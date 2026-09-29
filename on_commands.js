@@ -1,0 +1,1069 @@
+'use strict';
+/**
+ * Our Notes（com.bilibili.sirius.official）指令模块
+ *
+ *  卡片
+ *    /on查卡 <角色|团体|颜色> [星级]  卡片网格图（/oncard 同义）
+ *    /on查卡 <数字ID>                单卡详情图
+ *  曲目
+ *    /on查曲 <曲名|别名>        曲目卡（封面/作曲作词编曲/MV/BPM/时长/四难度/别名）
+ *    /on听曲 <曲名|别名>        歌曲语音（有完整版发完整版，否则发试听片段）
+ *    /on谱面预览 <曲名> [难度]   谱面长图（/on查谱面 是同一条；难度 ex/hd/nor/ez，默认 ex）
+ *  图鉴
+ *    /on卡池                    当期招募
+ *    /on贴纸 [角色]             贴纸图鉴
+ *    /on难度排行 [难度] [整数]   难度排行图
+ *    /on效益排行 [难度] [整数]   效益排行（单局理论最高分）
+ *    /on效率排行 [难度] [整数]   效率排行（效益 ÷ 时长）
+ *  别名
+ *    /on添加别名 <原名> <别名>   登记别名（谁都能用；加完立即可用并进待审核队列）
+ *  管理（不进 help）
+ *    /待审核                    列出待审核队列
+ *    /通过 <标号…|全部>          通过
+ *    /阻止 <标号…>              阻止：撤销该别名，并按「类型+曲目+别名」拉黑
+ *    /on更新 [资源|主数据] [应用|状态]  资源/主数据增量更新
+ *  其它
+ *    /onhelp [指令]             帮助（文本见 HELP_MAIN / HELP_DETAIL）
+ *
+ * 搜索：原名（中简/中繁/日/英/读音）+ 别名 + 模糊匹配（归一化后包含 / 字符重合度）。
+ */
+const { spawn } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+
+const ON_DIR = process.env.ON_DIR || '/home/admin/bot/data/on';
+const PY = process.env.ON_PY || 'python3';
+const CACHE_DIR = path.join(ON_DIR, 'cache');
+const CHART_DIR = path.join(ON_DIR, 'chart');
+const AUDIO_DIR = path.join(ON_DIR, 'audio');
+const ALIAS_FILE = path.join(ON_DIR, 'aliases.json');
+const ADMIN = String(process.env.ON_ADMIN || require(path.join(__dirname, 'lib', 'secrets.js')).get('admin') || '');
+const RENDER_TIMEOUT_MS = 90 * 1000;
+const withBundle = (n) => (String(n || '').endsWith('.bundle') ? String(n) : String(n || '') + '.bundle');
+
+// ---- CDN 包解密：UnityFS 明文直接用；否则按 unity-node 的方案解密
+//   key/seed 见 secrets.json（ON_BUNDLE_KEY / ON_BUNDLE_SEED）
+//   nonce = SHA256(seed || utf8(bundleName))[0:8]
+//   计数块 = nonce(8) || BE64(blockIndex)，AES-128-ECB 生成 keystream
+//   只异或前 min(size,16384) 字节，尾部原样保留
+const crypto = require('crypto');
+const { need } = require(path.join(__dirname, 'lib', 'secrets.js'));
+const BUNDLE_KEY = Buffer.from(need('bundleKey', 'ON_BUNDLE_KEY', 'UnityFS 资源包 AES-128 密钥'), 'hex');
+const BUNDLE_SEED = Buffer.from(need('bundleSeed', 'ON_BUNDLE_SEED', 'bundle nonce seed'), 'hex');
+const INNER_MAGIC = 'UnityFS\0';
+
+function maybeDecrypt(buf, name) {
+  if (buf.length >= 8 && buf.subarray(0, 8).toString('binary') === INNER_MAGIC) return buf;
+  const nonce = crypto.createHash('sha256')
+    .update(Buffer.concat([BUNDLE_SEED, Buffer.from(name, 'utf8')]))
+    .digest().subarray(0, 8);
+  const boundary = Math.min(buf.length, 16384);
+  const out = Buffer.from(buf);
+  let ctr = 0n;
+  for (let off = 0; off < boundary; off += 16) {
+    const cb = Buffer.alloc(16);
+    nonce.copy(cb, 0);
+    cb.writeBigUInt64BE(ctr, 8);
+    const c = crypto.createCipheriv('aes-128-ecb', BUNDLE_KEY, null);
+    c.setAutoPadding(false);
+    const ks = Buffer.concat([c.update(cb), c.final()]);
+    const n = Math.min(16, boundary - off);
+    for (let i = 0; i < n; i++) out[off + i] ^= ks[i];
+    ctr += 1n;
+  }
+  return out;
+}
+const RARITY_WORDS = { SSR: 'SSR', SR: 'SR', R: 'R', BD: 'BD', EX: 'EX' };
+// 属性颜色简称：红 / 蓝 / 绿 / 黄 / 紫（依次对应属性 1..5，
+// 即 MasterText 里的 CardType_Red / Blue / Green / Yellow / Purple_Name）
+const COLOR_WORDS = { 1: ['红', '红色'], 2: ['蓝', '蓝色'], 3: ['绿', '绿色'],
+  4: ['黄', '黄色'], 5: ['紫', '紫色'] };
+const DIFFS = ['EASY', 'NORMAL', 'HARD', 'EXPERT'];
+
+let INDEX = null, SONGS = null, ALIASES = {};
+const readJson = (p, d) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { return d; } };
+INDEX = readJson(path.join(ON_DIR, 'index.json'), null);
+SONGS = readJson(path.join(ON_DIR, 'songs.json'), null);
+ALIASES = readJson(ALIAS_FILE, {});
+// 别名审核队列：加别名立即可用并进 pending；被 /on阻止 的进 blocked
+// （黑名单按 类型 + 曲目 + 别名 记，别的曲子还能用同一个别名）
+const REVIEW_FILE = path.join(ON_DIR, 'alias_review.json');
+const REVIEW_TYPE = 'on别名';            // 目前只有这一种类型
+const REVIEW_TYPE_LABEL = '别名(on)';    // 队列里显示的样子
+const REVIEW = readJson(REVIEW_FILE, null) || {};
+REVIEW.pending = Array.isArray(REVIEW.pending) ? REVIEW.pending : [];
+REVIEW.blocked = Array.isArray(REVIEW.blocked) ? REVIEW.blocked : [];
+function saveReview() {
+  try { fs.writeFileSync(REVIEW_FILE, JSON.stringify(REVIEW, null, 1)); return true; }
+  catch (e) { console.error('[on] 审核队列写入失败:', e.message); return false; }
+}
+
+function saveAliases() {
+  try { fs.writeFileSync(ALIAS_FILE, JSON.stringify(ALIASES, null, 1)); return true; }
+  catch (e) { console.error('[on] 别名写入失败:', e.message); return false; }
+}
+
+const norm = (s) => String(s || '')
+  .toLowerCase()
+  .replace(/[\s　・·、,，.。!！?？~～\-—_'"“”‘’()（）\[\]【】:：;；/\\|+*&#@$%^]/g, '');
+
+// ---------------------------------------------------------------- 角色
+/** 把「团体 / 颜色」这类筛选词翻译成谓词；不是筛选就返回 null（交给角色/其它分支）。
+ *  支持一个或两个词，例：MyGO!!!!! ／ 绯红 ／ MyGO 绯红。
+ *  颜色用 index.json 的 typeName（绯红属性…），并额外接受去掉「属性」的简称。 */
+function matchFilters(q) {
+  if (!INDEX) return null;
+  const bands = [...new Set(INDEX.characters.map((c) => c.band).filter(Boolean))];
+  const typeOf = new Map();
+  for (const [id, name] of Object.entries(INDEX.typeName || {})) {
+    typeOf.set(norm(name), Number(id));
+    typeOf.set(norm(String(name).replace('属性', '')), Number(id));
+  }
+  for (const [id, words] of Object.entries(COLOR_WORDS)) {
+    for (const w of words) typeOf.set(norm(w), Number(id));
+  }
+  const byBand = (band) => (c) => {
+    const ch = INDEX.characters.find((x) => x.id === c.char);
+    return !!ch && ch.band === band;
+  };
+  const byType = (ty) => (c) => c.type === ty;
+  const typeName = (ty) => INDEX.typeName[String(ty)] || String(ty);
+
+  // 整串先试一次，避免 "Ave Mujica" 被拆成两个词重复匹配同一个团体
+  const whole = norm(q);
+  if (whole) {
+    const b = bands.find((x) => norm(x) === whole);
+    if (b) return { test: byBand(b), label: b };
+    if (typeOf.has(whole)) {
+      const ty = typeOf.get(whole);
+      return { test: byType(ty), label: typeName(ty) };
+    }
+  }
+
+  const tokens = String(q || '').split(/[\s　]+/).filter(Boolean);
+  const tests = [];
+  const labels = [];
+  const seen = new Set();
+  for (const t of tokens) {
+    const n = norm(t);
+    if (!n) return null;
+    const band = bands.find((b) => {
+      const bn = norm(b);
+      return bn === n || (n.length >= 2 && bn.includes(n));
+    });
+    if (band) {
+      if (seen.has('b:' + band)) continue;
+      seen.add('b:' + band);
+      tests.push(byBand(band));
+      labels.push(band);
+      continue;
+    }
+    if (typeOf.has(n)) {
+      const ty = typeOf.get(n);
+      if (seen.has('t:' + ty)) continue;
+      seen.add('t:' + ty);
+      tests.push(byType(ty));
+      labels.push(typeName(ty));
+      continue;
+    }
+    return null;                        // 有词不认识 → 不是筛选
+  }
+  if (!tests.length) return null;
+  return { test: (c) => tests.every((f) => f(c)), label: labels.join(' ・ ') };
+}
+
+function resolveCharacter(q) {
+  if (!INDEX) return null;
+  const s = norm(q);
+  if (!s) return null;
+  let best = null;
+  for (const ch of INDEX.characters) {
+    for (const a of ch.aliases) {
+      const an = norm(a);
+      if (an === s) return ch;
+      if (an.includes(s) || s.includes(an)) {
+        if (!best || an.length < best.len) best = { ch, len: an.length };
+      }
+    }
+  }
+  return best ? best.ch : null;
+}
+
+function parseCardQuery(arg) {
+  const raw = (arg || '').trim();
+  if (!raw) return { kind: 'help' };
+  if (/^\d+$/.test(raw.replace(/\s+/g, ''))) return { kind: 'detail', id: Number(raw.replace(/\s+/g, '')) };
+  const tokens = raw.split(/[\s　]+/).filter(Boolean);
+  let rarity = null;
+  const rest = [];
+  for (const t of tokens) {
+    const up = t.toUpperCase();
+    if (!rarity && RARITY_WORDS[up]) rarity = up;
+    else rest.push(t);
+  }
+  if (!rarity && rest.length) {
+    const m = /^(.*?)(SSR|SR|R|BD|EX)$/i.exec(rest[rest.length - 1]);
+    if (m && m[1]) { rest[rest.length - 1] = m[1]; rarity = m[2].toUpperCase(); }
+  }
+  const char = rest.join(' ').trim();
+  return char ? { kind: 'grid', char, rarity } : { kind: 'help' };
+}
+
+// ---------------------------------------------------------------- 曲目搜索
+function songNames(s) {
+  const set = new Set();
+  [s.title, s.title_tw, s.title_jp, s.title_en, s.phonetic].forEach((v) => { if (v) set.add(v); });
+  (ALIASES[String(s.id)] || []).forEach((v) => set.add(v));
+  return [...set];
+}
+
+function lcsRatio(a, b) {
+  // 粗略的字符重合度（用于模糊匹配）
+  if (!a || !b) return 0;
+  const A = new Set(a.split('')), B = new Set(b.split(''));
+  let inter = 0;
+  A.forEach((c) => { if (B.has(c)) inter++; });
+  const dice = (2 * inter) / (A.size + B.size);
+  if (a.includes(b) || b.includes(a)) return Math.max(dice, 0.85) + Math.min(a.length, b.length) / 1000;
+  return dice;
+}
+
+function resolveSong(q) {
+  if (!SONGS) return null;
+  const raw = String(q || '').trim();
+  if (!raw) return null;
+  if (/^\d{4,}$/.test(raw)) {
+    const byId = SONGS.songs.find((s) => s.id === Number(raw));
+    if (byId) return byId;
+  }
+  const s = norm(raw);
+  let exact = null, sub = null, fuzzy = null;
+  for (const song of SONGS.songs) {
+    for (const name of songNames(song)) {
+      const n = norm(name);
+      if (!n) continue;
+      if (n === s) { exact = exact || song; break; }
+      if (n.includes(s) || s.includes(n)) {
+        // 更长的匹配（更具体）优先
+        if (!sub || n.length > sub.len) sub = { song, len: n.length };
+      }
+      const r = lcsRatio(n, s);
+      if (r >= 0.72 && (!fuzzy || r > fuzzy.r)) fuzzy = { song, r };
+    }
+    if (exact) break;
+  }
+  return exact || (sub && sub.song) || (fuzzy && fuzzy.song) || null;
+}
+
+// 难度写法：ex / hd / nor / ez（也认全名），默认 EXPERT
+const DIFF_WORDS = { easy: 'EASY', ez: 'EASY', normal: 'NORMAL', nor: 'NORMAL', nm: 'NORMAL',
+  hard: 'HARD', hd: 'HARD', expert: 'EXPERT', ex: 'EXPERT' };
+
+/** 把「曲名 [难度]」拆开；没写难度就用默认（EXPERT） */
+function splitDiff(raw, def) {
+  const s = String(raw || '').trim();
+  const m = /^(.*?)[\s　]+([A-Za-z]+)$/.exec(s);
+  if (m && m[1].trim() && DIFF_WORDS[m[2].toLowerCase()]) {
+    return { q: m[1].trim(), diff: DIFF_WORDS[m[2].toLowerCase()] };
+  }
+  return { q: s, diff: def || 'EXPERT' };
+}
+
+function songLabel(s) {
+  const jp = s.title_jp || s.title || '';
+  const zh = s.title && s.title !== jp ? '（' + s.title + '）' : '';
+  return jp + zh;
+}
+
+/** 「没找到」时的回复：优先列出最相近的前 5 首（比干列前 12 首有用得多） */
+const songHelp = (q) => {
+  const tips = q ? similarSongs(q, 5) : [];
+  const head = q ? `没找到「${String(q).trim()}」。` : '没找到这首曲子。';
+  if (!tips.length) {
+    const list = (SONGS ? SONGS.songs : []).slice(0, 12).map((s) => songLabel(s)).join('、');
+    return `${head}部分曲目：${list || '（曲目表缺失）'}\n可用 /on查曲 <曲名> 查询，或 /on添加别名 <原名> <别名> 登记别名。`;
+  }
+  return [head + '是不是想找这几首：']
+    .concat(tips.map((t, i) => `${i + 1}. ${songLabel(t.song)}　#${t.song.id}`))
+    .concat(['也可以直接发曲目 ID，或用 /on添加别名 <原名> <别名> 登记别名。'])
+    .join('\n');
+};
+
+/** 最长公共子串长度（部分匹配比「字面重合度」更说明问题） */
+function lcSubstr(a, b) {
+  const la = a.length, lb = b.length;
+  if (!la || !lb) return 0;
+  let prev = new Array(lb + 1).fill(0), best = 0;
+  for (let i = 1; i <= la; i++) {
+    const cur = new Array(lb + 1).fill(0);
+    for (let j = 1; j <= lb; j++) {
+      if (a[i - 1] === b[j - 1]) {
+        cur[j] = prev[j - 1] + 1;
+        if (cur[j] > best) best = cur[j];
+      }
+    }
+    prev = cur;
+  }
+  return best;
+}
+
+/** 按相似度列候选曲目：精确 > 子串 > 0.5×字符重合度 + 0.5×最长公共子串占比
+ *  （只靠字面重合度的话，短查询容易被"碰巧共享几个字"的标题压过去） */
+function similarSongs(q, n, floor) {
+  if (!SONGS) return [];
+  const s = norm(q);
+  if (!s) return [];
+  n = n || 5;
+  floor = floor == null ? 0.32 : floor;
+  const out = [];
+  for (const song of SONGS.songs) {
+    let best = 0;
+    for (const name of songNames(song)) {
+      const nn = norm(name);
+      if (!nn) continue;
+      let sc;
+      if (nn === s) sc = 1;
+      else if (nn.includes(s) || s.includes(nn)) {
+        sc = 0.9 + 0.09 * Math.min(nn.length, s.length) / Math.max(nn.length, s.length);
+      } else {
+        sc = 0.6 * lcsRatio(nn, s) +
+             0.4 * lcSubstr(nn, s) / Math.max(nn.length, s.length);
+        // 开头两个字对得上（如「天球…」vs「天球のうた」）比"碰巧共享两个字"可信得多
+        if (nn.slice(0, 2) === s.slice(0, 2)) sc += 0.12;
+      }
+      if (sc > best) best = sc;
+    }
+    if (best >= floor) out.push({ song, score: best });
+  }
+  out.sort((a, b) => b.score - a.score || a.song.id - b.song.id);
+  return out.slice(0, n);
+}
+
+// ---------------------------------------------------------------- 渲染/下载
+function runPy(args, outPath) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(PY, args, { cwd: ON_DIR });
+    let log = '', done = false;
+    const timer = setTimeout(() => {
+      if (!done) { try { child.kill('SIGKILL'); } catch (e) {} reject(new Error('渲染超时')); }
+    }, RENDER_TIMEOUT_MS);
+    child.stdout.on('data', (d) => { log += d.toString(); });
+    child.stderr.on('data', (d) => { log += d.toString(); });
+    child.on('error', (e) => { done = true; clearTimeout(timer); reject(e); });
+    child.on('close', (code) => {
+      done = true; clearTimeout(timer);
+      if (code === 0 && fs.existsSync(outPath)) resolve(outPath);
+      else reject(new Error((log || '').trim().split('\n').slice(-2).join(' ') || ('退出码 ' + code)));
+    });
+  });
+}
+
+/** 跑一个 Python 脚本并把 stdout 收回来（runPy 要求有输出文件，这个不需要） */
+function runPyOut(args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(PY, args, { cwd: ON_DIR });
+    let log = '', done = false;
+    const timer = setTimeout(() => {
+      if (!done) { try { child.kill('SIGKILL'); } catch (e) {} reject(new Error('查询超时')); }
+    }, RENDER_TIMEOUT_MS);
+    child.stdout.on('data', (d) => { log += d.toString(); });
+    child.stderr.on('data', (d) => { log += d.toString(); });
+    child.on('error', (e) => { done = true; clearTimeout(timer); reject(e); });
+    child.on('close', (code) => {
+      done = true; clearTimeout(timer);
+      if (code === 0) resolve(log.trim());
+      else reject(new Error(log.trim().split('\n').slice(-2).join(' ') || ('退出码 ' + code)));
+    });
+  });
+}
+
+function curl(url, dest, auth) {
+  return new Promise((resolve, reject) => {
+    const args = ['-s', '-m', '120', '-o', dest];
+    if (auth) args.push('-u', auth);
+    args.push(url);
+    const child = spawn('curl', args);
+    let err = '';
+    child.stderr.on('data', (d) => { err += d.toString(); });
+    child.on('close', (code) => {
+      if (code === 0 && fs.existsSync(dest) && fs.statSync(dest).size > 512) resolve(dest);
+      else reject(new Error('下载失败: ' + (err || code)));
+    });
+  });
+}
+
+/** 取谱面 JSON（缓存到 data/on/chart/<id>_<DIFF>.json）
+ *  下载真实包名的 bundle（Bundle.load 解密要用真实包名做 nonce）
+ *  → 解析 TextAsset（m_Name 后 4 字节小端长度 + script）→ 其中含 gzip 段 → 解压成 JSON */
+async function ensureChart(song, diff) {
+  try { fs.mkdirSync(CHART_DIR, { recursive: true }); } catch (e) {}
+  const out = path.join(CHART_DIR, `${song.id}_${diff}.json`);
+  if (fs.existsSync(out) && fs.statSync(out).size > 200) return out;
+  const chart = (song.charts || []).find((c) => c.name === diff);
+  if (!chart || !chart.bundle) throw new Error(`没有 ${diff} 谱面`);
+  const bname = withBundle(chart.bundle);
+  const tmp = path.join('/tmp', bname);           // 必须用真实包名
+  await curl(`${SONGS.cdn}/${bname}`, tmp, SONGS.auth);
+  const json = extractChartJson(tmp);
+  fs.writeFileSync(out, json);
+  try { fs.unlinkSync(tmp); } catch (e) {}
+  return out;
+}
+
+/** 从谱面包里取出解压后的 JSON 文本 */
+function extractChartJson(bundlePath) {
+  let Bundle;
+  try {
+    Bundle = require(path.join(ON_DIR, 'unitysrc', 'bundle.js')).Bundle;
+  } catch (e) {
+    throw new Error('缺少 unitysrc（解析包体用）: ' + e.message);
+  }
+  const zlib = require('zlib');
+  const b = Bundle.load(bundlePath);
+  for (const e of b.listObjects()) {
+    if (e.className !== 'TextAsset') continue;
+    let raw;
+    try { raw = b.rawObject(e); } catch (err) { continue; }
+    const nameLen = raw.readUInt32LE(0);
+    let off = (4 + nameLen + 3) & ~3;
+    const scriptLen = raw.readUInt32LE(off);
+    if (scriptLen <= 0 || off + 4 + scriptLen > raw.length) continue;
+    const script = raw.subarray(off + 4, off + 4 + scriptLen);
+    const gz = script.indexOf(Buffer.from([0x1f, 0x8b, 0x08]));
+    if (gz < 0) continue;
+    try {
+      const text = zlib.gunzipSync(script.subarray(gz)).toString('utf8');
+      JSON.parse(text);
+      return text;
+    } catch (err) { /* 换下一个对象 */ }
+  }
+  throw new Error('这个包里没有可解析的谱面数据');
+}
+
+// bundle → ACB（试听包的明文 MonoBehaviour、完整版包的分片+异或）见 tools/acb.js，
+// 抽出去是为了让批处理测试和 bot 走同一份代码，不会再出现两边逻辑走偏。
+const { acbFromBundle, fullBundleFor } = require(path.join(__dirname, 'tools', 'acb.js'));
+
+/** 语音：缓存 mp3；没有就下载 bundle → 真 UnityFS 解包 → ACB → tools/hca_decode.py → ffmpeg。
+ *  **优先用完整版**（1~5 分钟），目录里没有才退回试听包（~28 秒，缓存名加 .short）。
+ *
+ *  三个坑（都会让解码「看起来跑通、其实全是噪声」）：
+ *   1. bundle 是 lz4hc 压缩的 UnityFS。直接在原始字节里 indexOf('@UTF') 拿到的是压缩残片
+ *      ——表头看着像模像样，里面 HCA 的 rate/blocks 字段却是乱的。必须用 unitysrc 真正解包。
+ *   2. 完整版包里的 ACB 是分片 + 单字节异或的，见 acbFromBundle()。
+ *   3. HCA 载荷用「基础密钥 × AFS2 subkey」推出的表替换，块尾 CRC16 覆盖的是密文。
+ *      细节与实测见 tools/hca_dec.c。 */
+async function ensureAudio(song) {
+  try { fs.mkdirSync(AUDIO_DIR, { recursive: true }); } catch (e) {}
+  if (!song.acbBundle) throw new Error('这首曲子没有对应的音频包');
+
+  const full = fullBundleFor(song.acbBundle);
+  const want = full || song.acbBundle;
+  const mp3 = path.join(AUDIO_DIR, `${song.id}${full ? '' : '.short'}.mp3`);
+  if (fs.existsSync(mp3) && fs.statSync(mp3).size > 4096) return mp3;
+
+  const bundle = path.join('/tmp', `onacb_${song.id}.bundle`);
+  await curl(`${SONGS.cdn}/${withBundle(want)}`, bundle, SONGS.auth);
+
+  let Bundle;
+  try {
+    Bundle = require(path.join(ON_DIR, 'unitysrc', 'bundle.js')).Bundle;
+  } catch (e) {
+    throw new Error('缺少 unitysrc（解析包体用）: ' + e.message);
+  }
+  const acbBuf = acbFromBundle(Bundle.load(bundle));
+  if (!acbBuf) throw new Error('包里没找到 ACB(@UTF)');
+  const acb = path.join('/tmp', `onacb_${song.id}.acb`);
+  fs.writeFileSync(acb, acbBuf);
+
+  const wav = path.join('/tmp', `onacb_${song.id}.wav`);
+  await new Promise((res, rej) => {
+    const c = spawn('python3', [path.join(__dirname, 'tools', 'hca_decode.py'), acb, wav]);
+    let log = '';
+    c.stdout.on('data', (d) => { log += d.toString(); });
+    c.stderr.on('data', (d) => { log += d.toString(); });
+    c.on('close', (code) => (code === 0 && fs.existsSync(wav)
+      ? res() : rej(new Error('解码失败: ' + log.slice(-160)))));
+  });
+  await new Promise((res, rej) => {
+    const c = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-i', wav,
+      '-codec:a', 'libmp3lame', '-b:a', '128k', mp3]);
+    let log = '';
+    c.stderr.on('data', (d) => { log += d.toString(); });
+    c.on('close', (code) => (code === 0 && fs.existsSync(mp3) ? res() : rej(new Error('转码失败: ' + log.slice(-120)))));
+  });
+  [bundle, acb, wav].forEach((f) => { try { fs.unlinkSync(f); } catch (e) {} });
+  return mp3;
+}
+
+// ---------------------------------------------------------------- 注册
+function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
+  // ---------------- 帮助
+  const HELP_MAIN = [
+    'Our Notes 指令一览（中英文名都认，全部以 /on 开头）',
+    '',
+    '【卡片】',
+    '/on查卡 <角色> [星级]         该角色的卡片列表图',
+    '/on查卡 <团体|颜色> [星级]    按团体 / 颜色筛卡',
+    '/on查卡 <数字ID>              单卡详情图',
+    '　星级 SSR / SR / R / BD / EX',
+    '　团体 MyGO!!!!! / Ave Mujica / millsage / 一家Dumb Rock! / 梦限大MewType',
+    '　颜色 红 / 蓝 / 绿 / 黄 / 紫',
+    '　例 /on查卡 灯　/on查卡 MyGO 蓝 SSR　/on查卡 12',
+    '',
+    '【曲目】',
+    '/on查曲 <曲名|别名>           曲目卡：封面・作曲作词・BPM・时长・四难度定数',
+    '/on听曲 <曲名|别名>           发语音（有完整版就发完整版）',
+    '/on谱面预览 <曲名|别名> [难度]  谱面图（查谱面 = 同一条指令）',
+    '　难度 ex / hd / nor / ez（默认 ex），也认全名',
+    '　例 /on查曲 迷星叫　/on听曲 天球のうた　/on谱面预览 迷星叫 HARD',
+    '',
+    '【图鉴・排行】',
+    '/on卡池                       当期招募：卡池・概率・Pick Up',
+    '/on贴纸 [角色]                贴纸图，不给角色就发全部',
+    '/on难度排行 [难度] [整数]      难度排行图',
+    '　例 /on难度排行 25（EXPERT 25.0~25.9）　/on难度排行 ex 25　/on难度排行 hd',
+    '/on效益排行 [难度] [整数]      效益排行（单局理论最高分，针对查曲）',
+    '/on效率排行 [难度] [整数]      效率排行（效益 ÷ 时长）',
+    '',
+    '【其它】',
+    '/on添加别名 <原名> <别名>      给曲子登记别名（加完立即可用）',
+    '/onhelp [指令]                这条帮助；带上指令名看单条用法',
+    '',
+    '曲名记不全也没关系，会按相似度列出最接近的几首。',
+  ].join('\n');
+
+  // 单条指令的详细用法（/onhelp <指令>）
+  const HELP_DETAIL = {
+    '查卡': ['/on查卡（/oncard）',
+      '用法 /on查卡 <角色> [星级]　/on查卡 <团体|颜色> [星级]　/on查卡 <数字ID>',
+      '按角色或按团体 / 颜色发卡片列表图；给数字 ID 就发单卡详情图。',
+      '星级 SSR / SR / R / BD / EX',
+      '团体 MyGO!!!!! / Ave Mujica / millsage / 一家Dumb Rock! / 梦限大MewType',
+      '颜色 红 / 蓝 / 绿 / 黄 / 紫',
+      '例 /on查卡 灯　/on查卡 MyGO 蓝 SSR　/on查卡 12'],
+    '查曲': ['/on查曲（/onsong、/on曲）',
+      '用法 /on查曲 <曲名|别名>',
+      '发一张曲目卡：封面、作曲 / 作词 / 编曲、MV、发布时间、BPM、时长、主唱，以及四个难度的定数与物量。',
+      '例 /on查曲 迷星叫　/on查曲 mayoiuta'],
+    '听曲': ['/on听曲（/onlisten、/on听歌）',
+      '用法 /on听曲 <曲名|别名>',
+      '发这首歌的语音：有完整版就发完整版，没有则发游戏内试听片段，随后补一张曲目卡。',
+      '例 /on听曲 迷星叫　/on听曲 天球のうた'],
+    '谱面预览': ['/on谱面预览（/onchart、/on查谱面、/on谱面）',
+      '用法 /on谱面预览 <曲名|别名> [难度]',
+      '把整首谱面画成一张长图；难度 ex / hd / nor / ez（默认 ex），写全名也行。',
+      '例 /on谱面预览 迷星叫　/on谱面预览 迷星叫 hd'],
+    '卡池': ['/on卡池（/ongacha、/on招募）',
+      '用法 /on卡池',
+      '当前正在开的招募：卡池名与时间、Pick Up 卡片、各星级概率。'],
+    '贴纸': ['/on贴纸（/onstamp）',
+      '用法 /on贴纸 [角色]',
+      '该角色的贴纸图鉴；不给角色就发全部角色的。',
+      '例 /on贴纸 灯　/on贴纸'],
+    '难度排行': ['/on难度排行（/onrank、/on排行）',
+      '用法 /on难度排行 [难度] [整数]',
+      '难度 ex / hd / nor / ez（默认 ex）；写了整数就只列这一段，如 25 → 25.0~25.9。',
+      '例 /on难度排行 25　/on难度排行 ex 25　/on难度排行 hd'],
+    '效益排行': ['/on效益排行（/onbenefit）',
+      '用法 /on效益排行 [难度] [整数难度]',
+      '按「单局理论最高分」排序：基础分 × Σ(1+连击加成) × (1+技能加成)，连击数与加成都取自游戏主数据。',
+      '例 /on效益排行　/on效益排行 hd 17'],
+    '效率排行': ['/on效率排行（/oneff）',
+      '用法 /on效率排行 [难度] [整数难度]',
+      '与效益排行同一套分数，再除以歌曲时长（分/秒），适合找「短而高分」的曲子。',
+      '例 /on效率排行　/on效率排行 ez'],
+    '添加别名': ['/on添加别名（/onalias、/on别名）',
+      '用法 /on添加别名 <原名> <别名>',
+      '登记之后 /on查曲、/on听曲、/on谱面预览 都能用这个别名（即时生效，同时进入待审核队列）。',
+      '例 /on添加别名 迷星叫 mayoiuta'],
+  };
+
+  // /onhelp 的参数 → 上面的键（中英文名与常用简称都认）
+  const HELP_ALIAS = {
+    'card': '查卡', '查卡': '查卡', '卡片': '查卡',
+    'song': '查曲', '曲': '查曲', '查曲': '查曲', '曲目': '查曲',
+    'listen': '听曲', '听曲': '听曲', '听歌': '听曲',
+    'chart': '谱面预览', '谱面预览': '谱面预览', '谱面': '谱面预览',
+    'chartinfo': '谱面预览', '查谱面': '谱面预览', '谱面数据': '谱面预览',
+    'gacha': '卡池', '卡池': '卡池', '招募': '卡池',
+    'stamp': '贴纸', '贴纸': '贴纸',
+    'rank': '难度排行', '难度排行': '难度排行', '排行': '难度排行',
+    'benefit': '效益排行', '效益排行': '效益排行', '效益': '效益排行',
+    'eff': '效率排行', 'efficiency': '效率排行', '效率排行': '效率排行', '效率': '效率排行',
+    'alias': '添加别名', '别名': '添加别名', '添加别名': '添加别名',
+    'help': '帮助', '帮助': '帮助', '说明': '帮助',
+  };
+
+  /** /onhelp [指令]：不给参数发总览，给了就看单条用法 */
+  function helpFor(arg) {
+    const q = String(arg || '').trim();
+    if (!q) return HELP_MAIN;
+    const key = HELP_ALIAS[norm(q)] || HELP_ALIAS[q.toLowerCase()];
+    if (key === '帮助') return HELP_MAIN;
+    if (key && HELP_DETAIL[key]) return HELP_DETAIL[key].join('\n');
+    return `没有「${q}」这条指令。可以查：${Object.keys(HELP_DETAIL).join('、')}\n直接发 /onhelp 看全部指令。`;
+  }
+
+  const target = (msg) => (msg.message_type === 'private'
+    ? { action: 'send_private_msg', base: { user_id: msg.sender.user_id } }
+    : { action: 'send_group_msg', base: { group_id: msg.group_id } });
+  const replyText = (ws, msg, text) => {
+    const t = target(msg);
+    sendReply(ws, t.action, Object.assign({}, t.base, { message: text }));
+  };
+  const replyImage = (ws, msg, file) => {
+    const t = target(msg);
+    sendReply(ws, t.action, Object.assign({}, t.base, { message: imageCqFromPath(file) }));
+  };
+  const replyMixed = (ws, msg, segs) => {
+    const t = target(msg);
+    sendReply(ws, t.action, Object.assign({}, t.base, { message: segs }));
+  };
+  const errText = (e) => String((e && e.message) || e).slice(0, 140);
+
+  // ---------------- 卡片
+  async function handleCard(ws, msg, arg) {
+    const q = parseCardQuery(arg);
+    if (q.kind === 'help') return replyText(ws, msg, helpFor('查卡'));
+    if (q.kind === 'detail') {
+      try {
+        const out = path.join(CACHE_DIR, `detail_${q.id}.png`);
+        const f = fs.existsSync(out) ? out : await runPy(['cardimg.py', 'detail', '--id', String(q.id), '--out', out], out);
+        return replyImage(ws, msg, f);
+      } catch (e) {
+        if (/没有 ID=/.test(errText(e))) return replyText(ws, msg, `没有 ID=${q.id} 的卡片（本版本共 60 张：1–60）。`);
+        console.error('[on] 详情失败:', errText(e));
+        return replyText(ws, msg, '图片生成失败：' + errText(e));
+      }
+    }
+    // 团体 / 颜色 筛选：/on查卡 MyGO!!!!! ／ /on查卡 绯红 ／ /on查卡 MyGO 绯红 SSR
+    const sel = matchFilters(q.char);
+    if (sel) {
+      let picked = INDEX.cards.filter(sel.test);
+      const rar = q.rarity ? { SSR: 4, SR: 3, R: 2, BD: 10, EX: 20 }[q.rarity] : null;
+      if (rar) picked = picked.filter((c) => c.rarity === rar);
+      if (!picked.length) {
+        return replyText(ws, msg, `没有符合条件的卡片（${sel.label}${q.rarity ? ' ' + q.rarity : ''}）。`);
+      }
+      picked.sort((a, b) => a.char - b.char || a.rarity - b.rarity);
+      const key = ('sel_' + norm(sel.label) + (q.rarity ? '_' + q.rarity : '')).replace(/[^\w\u4e00-\u9fa5]+/g, '_');
+      const out = path.join(CACHE_DIR, key + '.png');
+      try {
+        const f = fs.existsSync(out) ? out
+          : await runPy(['cardimg.py', 'grid', '--ids', picked.map((c) => c.id).join(','),
+            '--title', sel.label,
+            '--sub', (q.rarity ? q.rarity + ' ・ ' : '') + picked.length + ' 张',
+            '--out', out], out);
+        return replyImage(ws, msg, f);
+      } catch (e) {
+        console.error('[on] 筛选网格失败:', errText(e));
+        return replyText(ws, msg, '图片生成失败：' + errText(e));
+      }
+    }
+    const ch = resolveCharacter(q.char);
+    if (!ch) {
+      const names = INDEX ? INDEX.characters.map((c) => c.name).join('、') : '';
+      return replyText(ws, msg, `没有找到角色「${q.char}」。可用角色：${names}`);
+    }
+    let cards = ch.cards;
+    if (q.rarity) {
+      const want = { SSR: 4, SR: 3, R: 2, BD: 10, EX: 20 }[q.rarity];
+      cards = cards.filter((c) => c.rarity === want);
+      if (!cards.length) {
+        const have = [...new Set(ch.cards.map((c) => (INDEX.rarityLabel || {})[c.rarity] || c.rarity))].join('/');
+        return replyText(ws, msg, `${ch.name} 没有 ${q.rarity} 卡（现有：${have}）`);
+      }
+    }
+    const key = `grid_${ch.id}${q.rarity ? '_' + q.rarity : ''}`;
+    const out = path.join(CACHE_DIR, key + '.png');
+    try {
+      const f = fs.existsSync(out) ? out
+        : await runPy(['cardimg.py', 'grid', '--char', ch.name].concat(q.rarity ? ['--rarity', q.rarity] : []).concat(['--out', out]), out);
+      return replyImage(ws, msg, f);
+    } catch (e) {
+      console.error('[on] 网格失败:', errText(e));
+      return replyText(ws, msg, '图片生成失败：' + errText(e));
+    }
+  }
+
+  // ---------------- 曲目卡
+  async function handleSong(ws, msg, q) {
+    const song = resolveSong(q);
+    if (!song) return replyText(ws, msg, songHelp(q));
+    try {
+      let chartPath = null;
+      for (const d of ['EXPERT', 'HARD', 'NORMAL', 'EASY']) {
+        if ((song.charts || []).some((c) => c.name === d)) {
+          try { chartPath = await ensureChart(song, d); break; } catch (e) { /* 换下一个难度 */ }
+        }
+      }
+      const out = path.join(CACHE_DIR, `song_${song.id}.png`);
+      const args = ['songimg.py', 'song', '--id', String(song.id), '--aliases', ALIAS_FILE, '--out', out];
+      if (chartPath) args.push('--chart', chartPath);
+      // 曲目卡随别名变化，命中缓存但别名有更新时重画
+      const st = fs.existsSync(out) ? fs.statSync(out) : null;
+      const aSt = fs.existsSync(ALIAS_FILE) ? fs.statSync(ALIAS_FILE) : null;
+      const fresh = st && (!aSt || st.mtimeMs > aSt.mtimeMs);
+      const f = fresh ? out : await runPy(args, out);
+      return replyImage(ws, msg, f);
+    } catch (e) {
+      console.error('[on] 曲目卡失败:', errText(e));
+      return replyText(ws, msg, '曲目卡生成失败：' + errText(e));
+    }
+  }
+
+  // ---------------- 听曲
+  async function handleListen(ws, msg, q) {
+    const song = resolveSong(q);
+    if (!song) return replyText(ws, msg, songHelp(q));
+    let mp3 = null;
+    try {
+      mp3 = await ensureAudio(song);
+    } catch (e) {
+      console.log('[on] 语音不可用:', errText(e));
+    }
+    if (!mp3) {
+      replyText(ws, msg, `「${songLabel(song)}」的语音暂时拿不到（音频包解码失败），先发曲目卡：`);
+      return handleSong(ws, msg, String(song.id));
+    }
+    replyMixed(ws, msg, [{ type: 'record', data: { file: 'file://' + mp3 } }]);
+    const segs = [{ type: 'text', data: { text: '播放 ' + songLabel(song) } }];
+    const jk = path.join(ON_DIR, 'art', 'jacket', (song.jacket || '') + '.jpg');
+    if (song.jacket && fs.existsSync(jk)) segs.push({ type: 'image', data: { file: 'file://' + jk } });
+    replyMixed(ws, msg, segs);
+  }
+
+  // ---------------- 难度排行
+  async function handleRank(ws, msg, arg) {
+    const raw = String(arg || '').trim();
+    const D = { ex: 'EXPERT', expert: 'EXPERT', hd: 'HARD', hard: 'HARD',
+      nor: 'NORMAL', nm: 'NORMAL', normal: 'NORMAL', ez: 'EASY', easy: 'EASY' };
+    let diff = 'EXPERT', level = null;
+    for (const tok of raw.split(/[\s　]+/).filter(Boolean)) {
+      const t = tok.toLowerCase();
+      if (D[t]) { diff = D[t]; continue; }
+      if (/^\d+(\.\d+)?$/.test(t)) { level = Math.floor(Number(t)); continue; }
+      return replyText(ws, msg, helpFor('难度排行'));
+    }
+    const out = path.join(CACHE_DIR, `rank_${diff}${level == null ? '_all' : '_' + level}.png`);
+    try {
+      const f = fs.existsSync(out) ? out
+        : await runPy(['rankimg.py', '--diff', diff]
+          .concat(level == null ? [] : ['--level', String(level)])
+          .concat(['--out', out]), out);
+      return replyImage(ws, msg, f);
+    } catch (e) {
+      const m = errText(e);
+      if (/没有 Lv\.|难度只能是/.test(m)) return replyText(ws, msg, m);
+      console.error('[on] 难度排行失败:', m);
+      return replyText(ws, msg, '排行图生成失败：' + m);
+    }
+  }
+
+  // ---------------- 效益 / 效率排行（针对查曲）
+  const EFF_HELP = ['用法：/on效益排行 [ex|hd|nor|ez] [整数难度]',
+    '　例 /on效益排行　/on效益排行 hd 17　/on效率排行 ez',
+    '效益 = 单局理论最高分（按游戏主数据表推算）；效率 = 效益 ÷ 时长'].join('\n');
+
+  async function handleEff(ws, msg, arg, by) {
+    const raw = String(arg || '').trim();
+    let diff = 'EXPERT';
+    let level = null;
+    for (const tok of raw.split(/[\s\u3000]+/).filter(Boolean)) {
+      const t = tok.toLowerCase();
+      if (DIFF_WORDS[t]) { diff = DIFF_WORDS[t]; continue; }
+      if (/^\d+(\.\d+)?$/.test(t)) { level = Math.floor(Number(t)); continue; }
+      return replyText(ws, msg, EFF_HELP);
+    }
+    const out = path.join(CACHE_DIR, `${by}_${diff}${level == null ? '' : '_' + level}.png`);
+    try {
+      const f = await runPy(['effimg.py', '--by', by, '--diff', diff]
+        .concat(level == null ? [] : ['--level', String(level)])
+        .concat(['--out', out]), out);
+      return replyImage(ws, msg, f);
+    } catch (e) {
+      const m = errText(e);
+      if (/没有 Lv\.|缺少 score\.json|没有 .* 的数据/.test(m)) return replyText(ws, msg, m);
+      console.error('[on] 效益排行失败:', m);
+      return replyText(ws, msg, '排行图生成失败：' + m);
+    }
+  }
+
+  // ---------------- 贴纸
+  async function handleStamp(ws, msg, arg) {
+    const q = String(arg || '').trim();
+    const out = path.join(CACHE_DIR, 'stamp_' + (q ? norm(q).slice(0, 24) : 'all') + '.png');
+    try {
+      const f = fs.existsSync(out) ? out
+        : await runPy(['stampimg.py'].concat(q ? ['--char', q] : []).concat(['--out', out]), out);
+      return replyImage(ws, msg, f);
+    } catch (e) {
+      if (/没有找到角色/.test(errText(e))) {
+        const names = INDEX ? INDEX.characters.map((c) => c.name).join('、') : '';
+        return replyText(ws, msg, `没有找到角色「${q}」。可用角色：${names}`);
+      }
+      console.error('[on] 贴纸失败:', errText(e));
+      return replyText(ws, msg, '贴纸图生成失败：' + errText(e));
+    }
+  }
+
+  // ---------------- 卡池
+  async function handleGacha(ws, msg) {
+    try {
+      return replyText(ws, msg, await runPyOut(['gachainfo.py']));
+    } catch (e) {
+      console.error('[on] 卡池失败:', errText(e));
+      return replyText(ws, msg, '卡池读取失败：' + errText(e));
+    }
+  }
+
+  // ---------------- 谱面预览
+  async function handleChart(ws, msg, arg) {
+    const { q, diff } = splitDiff(arg);
+    const song = resolveSong(q);
+    if (!song) return replyText(ws, msg, songHelp(q));
+    const has = (song.charts || []).some((c) => c.name === diff);
+    if (!has) {
+      const list = (song.charts || []).map((c) => c.name).join('/');
+      return replyText(ws, msg, `「${songLabel(song)}」没有 ${diff} 谱面（现有：${list}）`);
+    }
+    try {
+      const chartPath = await ensureChart(song, diff);
+      const out = path.join(CACHE_DIR, `chart_${song.id}_${diff}.png`);
+      const f = await runPy(['songimg.py', 'chart', '--id', String(song.id), '--diff', diff,
+        '--chart', chartPath, '--aliases', ALIAS_FILE, '--out', out], out);
+      return replyImage(ws, msg, f);
+    } catch (e) {
+      console.error('[on] 谱面失败:', errText(e));
+      return replyText(ws, msg, '谱面生成失败：' + errText(e));
+    }
+  }
+
+  // ---------------- 别名（谁都能加：加完立即生效，同时进待审核队列）
+  const isAdmin = (msg) => String((msg.sender && msg.sender.user_id) || '') === ADMIN;
+
+  /** 队列文本：标号就是位置，删掉前面的条目后后面自动前移 */
+  function pendingText() {
+    const rows = REVIEW.pending.map((p, i) => {
+      const song = SONGS && SONGS.songs.find((s) => s.id === p.song);
+      const nm = (song && (song.title || song.title_jp)) || p.name || String(p.song);
+      return `${i + 1}. ${nm}${REVIEW_TYPE_LABEL}：${p.alias}`;
+    });
+    if (!rows.length) return '待审核：没有待审核的条目。';
+    return [`待审核（${rows.length} 条）`].concat(rows)
+      .concat(['/on通过 <标号…>　/on阻止 <标号…>　/on通过 全部']).join('\n');
+  }
+
+  const fmtItem = (it) => `${it.name || it.song}${REVIEW_TYPE_LABEL}：${it.alias}`;
+
+  /** 黑名单只在「同一类型 + 同一首歌 + 同一个别名」时生效 */
+  const isBlocked = (songId, alias) => REVIEW.blocked.some((b) => b.type === REVIEW_TYPE
+    && String(b.song) === String(songId) && norm(b.alias) === norm(alias));
+
+  function handleAlias(ws, msg, arg) {
+    const raw = String(arg || '').trim();
+    const parts = raw.split(/[\s　]+/).filter(Boolean);
+    if (parts.length < 2) {
+      return replyText(ws, msg, '用法：/on添加别名 <原名> <别名>　例：/on添加别名 迷星叫 mayoiuta');
+    }
+    const alias = parts.pop();
+    const name = parts.join(' ');
+    const song = resolveSong(name);
+    if (!song) return replyText(ws, msg, `没找到原曲「${name}」。${songHelp()}`);
+    const key = String(song.id);
+    const list = ALIASES[key] || (ALIASES[key] = []);
+    if (list.some((x) => norm(x) === norm(alias))) {
+      return replyText(ws, msg, `「${alias}」已经是 ${songLabel(song)} 的别名了。`);
+    }
+    if (isBlocked(song.id, alias)) {
+      return replyText(ws, msg, `「${alias}」被管理员阻止过，不能再给「${songLabel(song)}」当别名。`);
+    }
+    list.push(alias);
+    if (!saveAliases()) return replyText(ws, msg, '别名写入失败，请稍后重试。');
+    REVIEW.pending.push({
+      type: REVIEW_TYPE, song: song.id, name: song.title || song.title_jp || '',
+      alias, by: (msg.sender && msg.sender.user_id) || '', at: new Date().toISOString(),
+    });
+    saveReview();
+    replyText(ws, msg, `已为「${songLabel(song)}」添加别名：${alias}（已生效，同时进入待审核队列）\n现有别名：${list.join('、')}`);
+  }
+
+  /** 管理员：/on待审核 */
+  function handlePending(ws, msg) {
+    if (!isAdmin(msg)) return replyText(ws, msg, '这个指令只有管理员能用哦。');
+    replyText(ws, msg, pendingText());
+  }
+
+  /** 「1 2 3」/「1,2,3」→ 0 基下标；有问题返回 { err } */
+  function parseIndexes(arg, len) {
+    const toks = String(arg || '').split(/[\s　,，、]+/).filter(Boolean);
+    if (!toks.length) return { err: '没给标号。' };
+    const idx = [];
+    for (const t of toks) {
+      if (!/^\d+$/.test(t)) return { err: `「${t}」不是标号。` };
+      const n = Number(t);
+      if (n < 1 || n > len) return { err: `标号 ${n} 超出范围（现在只有 1~${len}）。` };
+      if (!idx.includes(n - 1)) idx.push(n - 1);
+    }
+    return { idx };
+  }
+
+  /** 管理员：/on阻止 <标号…> —— 撤销这些别名，并拉黑 */
+  function handleBlock(ws, msg, arg) {
+    if (!isAdmin(msg)) return replyText(ws, msg, '这个指令只有管理员能用哦。');
+    const len = REVIEW.pending.length;
+    if (!len) return replyText(ws, msg, pendingText());
+    const p = parseIndexes(arg, len);
+    if (p.err) return replyText(ws, msg, `${p.err}\n${pendingText()}`);
+    const picked = p.idx.map((i) => REVIEW.pending[i]);
+    for (const it of picked) {
+      const key = String(it.song);
+      const left = (ALIASES[key] || []).filter((x) => norm(x) !== norm(it.alias));
+      if (left.length) ALIASES[key] = left; else delete ALIASES[key];
+      if (!isBlocked(it.song, it.alias)) {
+        REVIEW.blocked.push({ type: REVIEW_TYPE, song: it.song, name: it.name || '',
+          alias: it.alias, by: (msg.sender && msg.sender.user_id) || '', at: new Date().toISOString() });
+      }
+    }
+    REVIEW.pending = REVIEW.pending.filter((x) => !picked.includes(x));
+    saveAliases(); saveReview();
+    replyText(ws, msg, `已阻止 ${picked.length} 条：${picked.map(fmtItem).join('、')}\n\n${pendingText()}`);
+  }
+
+  /** 管理员：/on通过 <标号…|全部> —— 通过（别名继续保持可用） */
+  function handleApprove(ws, msg, arg) {
+    if (!isAdmin(msg)) return replyText(ws, msg, '这个指令只有管理员能用哦。');
+    const len = REVIEW.pending.length;
+    if (!len) return replyText(ws, msg, pendingText());
+    const a = String(arg || '').trim();
+    let picked;
+    if (/^(全部|all)$/i.test(a)) picked = REVIEW.pending.slice();
+    else {
+      const p = parseIndexes(a, len);
+      if (p.err) return replyText(ws, msg, `${p.err}（也可以用 /on通过 全部）\n${pendingText()}`);
+      picked = p.idx.map((i) => REVIEW.pending[i]);
+    }
+    REVIEW.pending = REVIEW.pending.filter((x) => !picked.includes(x));
+    saveReview();
+    replyText(ws, msg, `已通过 ${picked.length} 条：${picked.map(fmtItem).join('、')}\n\n${pendingText()}`);
+  }
+
+  // ---------------- 资源更新（管理员一键）
+  const UPDATE_JS = require('path').join(__dirname, 'tools', 'on_update.js');
+  const MASTER_JS = require('path').join(__dirname, 'tools', 'on_master.js');
+
+  function handleUpdate(ws, msg, arg) {
+    if (String(msg.sender.user_id) !== ADMIN) {
+      return replyText(ws, msg, '这个指令只有管理员能用哦。');
+    }
+    const a = (arg || '').trim();
+    const { execFile } = require('child_process');
+    const isMaster = /主数据|master/i.test(a);
+    const argv = [isMaster ? MASTER_JS : UPDATE_JS];
+    const isStatus = /状态|status/i.test(a);
+    if (isStatus && !isMaster) argv.push('--status');
+    else if (/应用|下载|apply/i.test(a)) argv.push('--apply');
+    argv.push('--json');
+    replyText(ws, msg, isMaster ? (/(应用|下载)/.test(a) ? '正在更新主数据表…' : '正在检查主数据…') : isStatus ? '读取更新状态…'
+      : (/应用|下载|apply/i.test(a) ? '正在检查并下载新资源，可能要一会儿…' : '正在检查资源更新…'));
+    execFile('node', argv, { timeout: 300000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+      let d = null;
+      const raw = String(stdout || '').trim();
+      try { d = JSON.parse(raw); } catch (e) {
+        const i = raw.indexOf('{');                       // --json 是多行美化输出，整体解析
+        if (i >= 0) { try { d = JSON.parse(raw.slice(i)); } catch (e2) {} }
+      }
+      if (!d) {
+        return replyText(ws, msg, '资源更新脚本执行异常：' + String((err && err.message) || '输出无法解析').slice(0, 200));
+      }
+      if (isMaster) {                                                  // 主数据
+        if (d.errors && d.errors.length) {
+          return replyText(ws, msg, '主数据检查失败：' + d.errors.join('；').slice(0, 300));
+        }
+        const lines = [`主数据（resourceVersion ${d.resourceVersion || '-'}）`,
+          `表数 ${d.total || '-'}，本次变更 ${(d.changedTables || []).length} 张`];
+        if (d.applied) {
+          lines.push(`已下载并解密：${d.applied.ok}/${d.applied.tried}，失败 ${(d.applied.failed || []).length}`);
+          if (d.applied.ok) {
+            const g = d.regenerated || {};
+            const good = (g.ok || []).join(' / ');
+            const bad = (g.failed || []).map((f) => f.label).join(' / ');
+            lines.push(good ? `已自动重建派生索引：${good}` : '派生索引未重建，请看 /tmp/on_update.log');
+            if (bad) lines.push(`重建失败：${bad}`);
+          }
+        } else if (!(d.changedTables || []).length) {
+          lines.push('已是最新，无需下载。');
+        } else {
+          lines.push('发「/on更新 主数据 应用」即可下载并解密变更表。');
+        }
+        return replyText(ws, msg, lines.join('\n'));
+      }
+      if (isStatus && d.inventory !== undefined) {                      // --status
+        return replyText(ws, msg, [
+          '资源更新状态',
+          `catalog hash：${d.catalogHash || '-'}`,
+          `已知资源包：${d.inventory} 个`,
+          `上次新增：${d.lastNew} 个${d.lastNewAt ? '（' + d.lastNewAt.replace('T', ' ').slice(0, 19) + '）' : ''}`,
+          `密钥状态：${d.keySuspect ? '可疑，需人工提供新 APK' : '正常'}`,
+        ].join('\n'));
+      }
+      if (d.errors && d.errors.length) {
+        return replyText(ws, msg, '检查失败：' + d.errors.join('；').slice(0, 300));
+      }
+      const cats = Object.entries(d.categories || {}).map(([k, v]) => `${k} ${v}`).join('、');
+      const lines = [];
+      if (d.firstRun) lines.push(`已建立基线：记录 ${d.inventoryCount} 个资源包`);
+      else if (!d.new || !d.new.length) lines.push(`无更新（已知 ${d.inventoryCount} 个资源包）`);
+      else {
+        lines.push(`发现 ${d.new.length} 个新增资源包：${cats}`);
+        if (d.removedCount) lines.push(`（另有 ${d.removedCount} 个已下架）`);
+        if (d.applied) {
+          lines.push(`下载并解密：${d.applied.ok}/${d.applied.tried} 成功，${(d.applied.bytes / 1048576).toFixed(2)}MB`);
+          if (d.applied.failed && d.applied.failed.length) lines.push('失败：' + d.applied.failed.slice(0, 3).map((f) => f.name.slice(0, 40)).join('、'));
+        } else {
+          lines.push('发「/on更新 应用」即可自动下载并解密这些资源。');
+        }
+      }
+      if (d.keySuspect) lines.push('解密校验失败：密钥可能已更换，需要人工提供新 APK。');
+      replyText(ws, msg, lines.join('\n'));
+    });
+  }
+
+  // ---------------- 匹配注册
+  const defs = [
+    { re: /^\s*\/on(?:card|查卡)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleCard(ws, msg, m[1] || '') },
+    { re: /^\s*\/on(?:rank|难度排行|排行)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleRank(ws, msg, m[1] || '') },
+    { re: /^\s*\/on(?:benefit|效益排行|效益)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleEff(ws, msg, m[1] || '', 'benefit') },
+    { re: /^\s*\/on(?:efficiency|eff|效率排行|效率)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleEff(ws, msg, m[1] || '', 'eff') },
+    { re: /^\s*\/on(?:stamp|贴纸)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleStamp(ws, msg, m[1] || '') },
+    { re: /^\s*\/on(?:gacha|卡池|招募)\s*([\s\S]*)$/i, run: (ws, msg) => handleGacha(ws, msg) },
+    { re: /^\s*\/on(?:song|曲|查曲)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleSong(ws, msg, m[1] || '') },
+    { re: /^\s*\/on(?:listen|听曲|听歌)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleListen(ws, msg, m[1] || '') },
+    { re: /^\s*\/on(?:chart|chartinfo|谱面预览|谱面数据|谱面|查谱面)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleChart(ws, msg, m[1] || '') },
+    { re: /^\s*\/on(?:alias|别名|添加别名)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleAlias(ws, msg, m[1] || '') },
+    { re: /^\s*\/(?:review|待审核)\s*([\s\S]*)$/i, run: (ws, msg) => handlePending(ws, msg) },
+    { re: /^\s*\/(?:block|阻止)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleBlock(ws, msg, m[1] || '') },
+    { re: /^\s*\/(?:approve|通过)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleApprove(ws, msg, m[1] || '') },
+    { re: /^\s*\/on(?:update|更新)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleUpdate(ws, msg, m[1] || '') },
+    { re: /^\s*\/on(?:help|帮助|说明|\?)\s*([\s\S]*)$/i, run: (ws, msg, m) => replyText(ws, msg, helpFor(m[1] || '')) },
+  ];
+  for (const d of defs) {
+    commands.push({
+      ignoreAt: true,
+      match(plainText) {
+        const m = d.re.exec(plainText || '');
+        return m ? { m } : false;
+      },
+      execute(ws, msg, params) {
+        d.run(ws, msg, params.m);
+      },
+    });
+  }
+
+  console.log('Our Notes 指令已注册: /on查卡 /oncard /on查曲 /on听曲 /on谱面预览 /on查谱面 /on卡池 /on贴纸 /on难度排行 /on效益排行 /on效率排行 /on添加别名 /on待审核 /on通过 /on阻止 /on更新 /onhelp'
+    + `（角色 ${INDEX ? INDEX.characters.length : 0} / 卡片 ${INDEX ? INDEX.cards.length : 0} / 曲目 ${SONGS ? SONGS.songs.length : 0}`
+    + `，别名 ${Object.keys(ALIASES).length} 条，CRI密钥 ${process.env.ON_CRI_KEY ? '已配置' : '未配置'}）`);
+}
+
+module.exports = register;

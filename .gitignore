@@ -1,0 +1,30 @@
+# ---- 密钥 / 凭据（永远不要提交）----
+secrets.json
+
+# ---- 游戏数据：一律不入库（版权属于 Bushiroad / Craft Egg / Ishimori）----
+data/on/master/
+data/on/art/
+data/on/ui/
+data/on/cache/
+data/on/chart/
+data/on/audio/
+data/on/vgm/
+data/on/dl/
+data/on/*.json
+data/on/*.bin
+!data/on/unitysrc/*.json
+
+# ---- 运行期产物 ----
+node_modules/
+*.db
+*.db-shm
+*.db-wal
+*.log
+*.bak
+*.tmp
+__pycache__/
+*.pyc
+sample_*.png
+
+# ---- 内部文档（含密钥与服务器细节，不公开）----
+HANDOFF-*.md
