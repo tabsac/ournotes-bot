@@ -1456,7 +1456,8 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
 
   // ---------------- 小游戏：/on猜卡 /on猜曲 /on猜语音 + /回答（/答、/猜）/结束
   // 一局一题，按会话（群 / 私聊）存；答对或 /结束 收局。答案用「模糊匹配 + 别名」判定。
-  // 谜面与文字同一条发出；收局给完整语音 / 原文 / 曲绘 / 完整卡面。
+  // 图片与文字同一条发出；**语音和文字分两条**（同一条时 QQ 只显示语音气泡）。
+  // 收局给完整语音 / 原文 / 曲绘 / 完整卡面。
   const GAMES = new Map();                     // 'g:<群号>' / 'p:<QQ>' -> 当前这一局
   const GAME_TTL_MS = 30 * 60 * 1000;          // 兜底：半小时没动静就作废（正常有一分钟时限）
   const GAME_MS = 60 * 1000;                   // 一局时限：谜面（全部素材）发完开始计时 1 分钟
@@ -1560,7 +1561,9 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
 
   /** 谜面下面的提示文字（猜曲不带文字，只发音频） */
   const guessPrompt = (r) => {
-    const head = r.type === 'voice' ? '听 3 秒，这是哪个角色？' : '这是哪张卡的角色？';
+    const head = r.type === 'song' ? '听 3 秒，这是哪首歌？'
+      : r.type === 'voice' ? '听 3 秒，这是哪个角色？'
+        : '这是哪张卡的角色？';
     return `${GAME_KIND[r.type]}：${head}\n发 /回答 <答案>（/答、/猜 同义），放弃发 /结束`;
   };
 
@@ -1576,8 +1579,29 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
 
   const mediaSeg = (type, f) => ({ type: type, data: { file: 'file://' + f } });
 
-  /** 开一局：记状态 → 谜面与文字同一条发出 → 素材发完才开始算 1 分钟
-   *  （猜曲只发音频，不带文字） */
+  /** 发一段消息（若干段） */
+  function sendSegs(ws, msg, segs) {
+    if (!segs || !segs.length) return;
+    const t = target(msg);
+    sendReply(ws, t.action, Object.assign({}, t.base, { message: segs }));
+  }
+
+  /** 谜面的发法：图片可以和文字同一条；**语音必须和文字分两条**
+   *  （QQ 里「语音 + 文字」放进同一条消息时，只会显示语音气泡，文字看不到 —— 踩过）
+   *  返回发出去的最后一段，调用方据此开始计时。 */
+  function sendPuzzle(ws, msg, r, seg) {
+    const textSeg = { type: 'text', data: { text: guessPrompt(r) } };
+    if (seg && seg.type === 'record') {
+      sendSegs(ws, msg, [seg]);
+      sendSegs(ws, msg, [textSeg]);
+    } else if (seg) {
+      sendSegs(ws, msg, [seg, textSeg]);
+    } else {
+      sendSegs(ws, msg, [textSeg]);
+    }
+  }
+
+  /** 开一局：记状态 → 发谜面 → 素材发完才开始算 1 分钟 */
   function openRound(ws, msg, r, file, seg) {
     dropRound(gameKey(msg));
     sweepGuessTmp();
@@ -1586,11 +1610,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     r.file = file || null;
     GAMES.set(gameKey(msg), r);
     console.log(`[on] ${GAME_KIND[r.type]}开局 key=${gameKey(msg)} 答案=${r.answer.label}`);
-    const t = target(msg);
-    const segs = [];
-    if (seg) segs.push(seg);
-    if (r.type !== 'song') segs.push({ type: 'text', data: { text: guessPrompt(r) } });
-    sendReply(ws, t.action, Object.assign({}, t.base, { message: segs }));
+    sendPuzzle(ws, msg, r, seg);
     // 全部资源发出去之后开始计时
     r.deadline = Date.now() + GAME_MS;
     r.timer = setTimeout(() => {
@@ -1740,8 +1760,8 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     if (note) text += `\n${note}`;
     segs.push({ type: 'text', data: { text: text } });
     if (art) segs.push(mediaSeg('image', art));
-    if (audio) segs.push(mediaSeg('record', audio));
-    replyMixed(ws, msg, segs);
+    sendSegs(ws, msg, segs);                     // 文字（+ 图）一条
+    if (audio) sendSegs(ws, msg, [mediaSeg('record', audio)]);   // 语音单独一条，免得文字被吃掉
   }
 
   async function handleAnswer(ws, msg, arg) {
