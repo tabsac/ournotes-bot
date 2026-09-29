@@ -8,8 +8,10 @@
  *  曲目
  *    /on查曲 <曲名|别名>        曲目卡（封面/作曲作词编曲/MV/BPM/时长/四难度/别名）
  *    /on听曲 <曲名|别名>        歌曲语音（有完整版发完整版，否则发试听片段）
+ *    /on听 [角色]               角色语音：随机一条 + 中文文本（双引号）
  *    /on谱面预览 <曲名> [难度]   谱面长图（/on查谱面 是同一条；难度 ex/hd/nor/ez，默认 ex）
  *  图鉴
+ *    /on小漫画 [角色]           随机一张加载漫画
  *    /on卡池                    当期招募
  *    /on贴纸 [角色]             贴纸图鉴
  *    /on难度排行 [难度] [整数]   难度排行图
@@ -513,12 +515,14 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     '',
     '【曲目】',
     '/on查曲 <曲名|别名>           曲目卡：封面・作曲作词・BPM・时长・四难度定数',
-    '/on听曲 <曲名|别名>           发语音（有完整版就发完整版）',
+    '/on听曲 <曲名|别名>           歌曲语音（有完整版就发完整版）',
+    '/on听 [角色]                  角色语音：随机一条 + 中文文本',
     '/on谱面预览 <曲名|别名> [难度]  谱面图（查谱面 = 同一条指令）',
     '　难度 ex / hd / nor / ez（默认 ex），也认全名',
     '　例 /on查曲 迷星叫　/on听曲 天球のうた　/on谱面预览 迷星叫 HARD',
     '',
     '【图鉴・排行】',
+    '/on小漫画 [角色]              随机一张加载漫画（不给角色就随机）',
     '/on卡池                       当期招募：卡池・概率・Pick Up',
     '/on贴纸 [角色]                贴纸图，不给角色就发全部',
     '/on难度排行 [难度] [整数]      难度排行图',
@@ -550,10 +554,18 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
       '用法 /on听曲 <曲名|别名>',
       '发这首歌的语音：有完整版就发完整版，没有则发游戏内试听片段，随后补一张曲目卡。',
       '例 /on听曲 迷星叫　/on听曲 天球のうた'],
+    '角色语音': ['/on听（/onvoice、/on语音）',
+      '用法 /on听 [角色]',
+      '随机发一条该角色的语音，并把这条语音的中文文本用双引号一起发出；不给角色就随机一个角色。',
+      '例 /on听 灯　/on听 祥子　/on听'],
     '谱面预览': ['/on谱面预览（/onchart、/on查谱面、/on谱面）',
       '用法 /on谱面预览 <曲名|别名> [难度]',
       '把整首谱面画成一张长图；难度 ex / hd / nor / ez（默认 ex），写全名也行。',
       '例 /on谱面预览 迷星叫　/on谱面预览 迷星叫 hd'],
+    '小漫画': ['/on小漫画（/oncomic）',
+      '用法 /on小漫画 [角色]',
+      '随机发一张游戏的加载小漫画；写角色名就只看该角色的那几张（每个角色各有一张）。',
+      '例 /on小漫画　/on小漫画 灯'],
     '卡池': ['/on卡池（/ongacha、/on招募）',
       '用法 /on卡池',
       '当前正在开的招募：卡池名与时间、Pick Up 卡片、各星级概率。'],
@@ -584,8 +596,10 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     'card': '查卡', '查卡': '查卡', '卡片': '查卡',
     'song': '查曲', '曲': '查曲', '查曲': '查曲', '曲目': '查曲',
     'listen': '听曲', '听曲': '听曲', '听歌': '听曲',
+    'voice': '角色语音', '语音': '角色语音', '听': '角色语音',
     'chart': '谱面预览', '谱面预览': '谱面预览', '谱面': '谱面预览',
     'chartinfo': '谱面预览', '查谱面': '谱面预览', '谱面数据': '谱面预览',
+    'comic': '小漫画', '小漫画': '小漫画', '漫画': '小漫画',
     'gacha': '卡池', '卡池': '卡池', '招募': '卡池',
     'stamp': '贴纸', '贴纸': '贴纸',
     'rank': '难度排行', '难度排行': '难度排行', '排行': '难度排行',
@@ -732,6 +746,235 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     const jk = path.join(ON_DIR, 'art', 'jacket', (song.jacket || '') + '.jpg');
     if (song.jacket && fs.existsSync(jk)) segs.push({ type: 'image', data: { file: 'file://' + jk } });
     replyMixed(ws, msg, segs);
+  }
+
+  // ---------------- 角色语音（/on听 <角色>） ----------------
+  const CRI_URL = readJson(path.join(ON_DIR, 'cri_url.json'), {}) || {};   // tools/cri_url.py 生成
+  const VOICE_DIR = path.join(ON_DIR, 'audio', 'voice');
+  const CRI_DIR = path.join('/tmp', 'on_cri');
+  let SOUND_MAP = null;      // soundId -> {cue, sheet, textId}
+  let VOICES = null;         // [{char, soundId, textId, from}]
+
+  /** soundId → cue 名 + cueSheet（MasterSound / MasterSoundCueSheet），顺带带出文本 id */
+  function soundMap() {
+    if (SOUND_MAP) return SOUND_MAP;
+    SOUND_MAP = new Map();
+    try {
+      const sheet = new Map();
+      for (const r of (readJson(path.join(ON_DIR, 'master', 'MasterSoundCueSheet.json'), {}) || {})._allData || []) {
+        if (r._cueSheetName) sheet.set(r._id, r._cueSheetName);
+      }
+      for (const r of (readJson(path.join(ON_DIR, 'master', 'MasterSound.json'), {}) || {})._allData || []) {
+        if (r._id != null && r._cueName) SOUND_MAP.set(r._id, { cue: r._cueName, sheet: sheet.get(r._soundCueSheetID) || null });
+      }
+    } catch (e) { console.error('[on] 语音表读取失败:', errText(e)); }
+    return SOUND_MAP;
+  }
+
+  /** 每个角色的语音清单：角色成长语音 + 演出开始语音 + 首页对话（三张表合并） */
+  function voices() {
+    if (VOICES) return VOICES;
+    VOICES = [];
+    const sm = soundMap();
+    const push = (rows, idKey, textKey, from) => {
+      for (const r of rows) {
+        const sid = r[idKey];
+        const info = sm.get(sid);
+        if (!r._characterId || !info || !info.cue || !info.sheet) continue;
+        VOICES.push({ char: r._characterId, soundId: sid, textId: r[textKey], from: from });
+      }
+    };
+    const load = (n) => (readJson(path.join(ON_DIR, 'master', 'Master' + n + '.json'), {}) || {})._allData || [];
+    push(load('CharacterVoice'), '_soundId', '_textId', '成长语音');
+    push(load('LiveStartCharacterVoice'), '_voiceSoundId', '_voiceTextId', '演出开始');
+    push(load('Talk'), '_voiceSoundId', '_textId', '首页对话');
+    console.log('[on] 角色语音清单 ' + VOICES.length + ' 条，覆盖角色 ' + new Set(VOICES.map((v) => v.char)).size + ' 个');
+    return VOICES;
+  }
+
+  /** 中文文本：MasterText 的 _simplifiedChinese */
+  function voiceText(textId) {
+    try {
+      if (!voiceText.TXT) {
+        voiceText.TXT = new Map();
+        for (const r of (readJson(path.join(ON_DIR, 'master', 'MasterText.json'), {}) || {})._allData || []) {
+          if (r && r._id) voiceText.TXT.set(String(r._id), r._simplifiedChinese || r._traditionalChinese || '');
+        }
+      }
+      return String(voiceText.TXT.get(String(textId)) || '').trim();
+    } catch (e) { return ''; }
+  }
+
+  /** 取一条语音的 mp3（缓存 data/on/audio/voice/<soundId>.mp3） */
+  async function ensureVoice(v, cueUrl) {
+    fs.mkdirSync(VOICE_DIR, { recursive: true });
+    const mp3 = path.join(VOICE_DIR, v.soundId + '.mp3');
+    if (fs.existsSync(mp3) && fs.statSync(mp3).size > 2048) return mp3;
+    fs.mkdirSync(CRI_DIR, { recursive: true });
+    const acb = path.join(CRI_DIR, v.sheetName + '.acb');
+    if (!fs.existsSync(acb) || fs.statSync(acb).size < 10240) {
+      await curl(cueUrl, acb, null);                 // CRI 音频包是公开的，不带 CDN 凭据
+    }
+    const wav = path.join(CRI_DIR, v.soundId + '.wav');
+    await new Promise((res, rej) => {
+      const c = spawn('python3', [path.join(__dirname, 'tools', 'acb_cues.py'), '--acb', acb,
+        '--select', v.cueName, '--wav', wav], { cwd: path.join(__dirname, 'tools') });
+      let log = '';
+      c.stdout.on('data', (d) => { log += d.toString(); });
+      c.stderr.on('data', (d) => { log += d.toString(); });
+      c.on('close', (code) => (code === 0 && fs.existsSync(wav)
+        ? res() : rej(new Error('取音频失败: ' + log.trim().split('\n').slice(-1)[0].slice(0, 120)))));
+    });
+    await new Promise((res, rej) => {
+      const c = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-i', wav,
+        '-codec:a', 'libmp3lame', '-b:a', '128k', mp3]);
+      let log = '';
+      c.stderr.on('data', (d) => { log += d.toString(); });
+      c.on('close', (code) => (code === 0 && fs.existsSync(mp3) ? res() : rej(new Error('转码失败: ' + log.slice(-120)))));
+    });
+    try { fs.unlinkSync(wav); } catch (e) {}
+    return mp3;
+  }
+
+  async function handleVoice(ws, msg, arg) {
+    const q = String(arg || '').trim();
+    const all = voices();
+    if (!all.length) return replyText(ws, msg, '语音数据缺失（先让管理员跑 /on更新 主数据）');
+    let pool = all;
+    let who = '';
+    if (q) {
+      const ch = resolveCharacter(q) || (INDEX && INDEX.characters.find((c) => String(c.id) === q));
+      if (!ch) {
+        const names = INDEX ? INDEX.characters.map((c) => c.name).join('、') : '';
+        return replyText(ws, msg, `没有找到角色「${q}」。可用角色：${names}`);
+      }
+      pool = all.filter((v) => v.char === ch.id);
+      who = ch.name;
+      if (!pool.length) return replyText(ws, msg, `「${ch.name}」还没有语音`);
+    }
+    if (!Object.keys(CRI_URL).length) {
+      return replyText(ws, msg, '音频包映射表缺失（先跑 tools/cri_url.py 生成 cri_url.json）');
+    }
+    // 只有音频包已收录的语音才能播放，先筛掉其余条目再随机
+    const usable = [];
+    for (const v of pool) {
+      const info = soundMap().get(v.soundId) || {};
+      const hit = (CRI_URL[String(info.sheet || '').toLowerCase()] || [])[0];
+      if (hit && hit.url) usable.push({ v: v, cue: info.cue, sheet: info.sheet, url: hit.url });
+    }
+    if (!usable.length) {
+      return replyText(ws, msg, q ? `「${who}」的语音包还没收录（跑 tools/cri_url.py 更新 cri_url.json）`
+        : '没有可播放的语音（跑 tools/cri_url.py 更新 cri_url.json）');
+    }
+    for (let i = usable.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      const sw = usable[i]; usable[i] = usable[j]; usable[j] = sw;
+    }
+    let lastErr = null;
+    for (const item of usable.slice(0, 4)) {
+      const pick = item.v;
+      try {
+        const mp3 = await ensureVoice({ soundId: pick.soundId, cueName: item.cue, sheetName: item.sheet }, item.url);
+        replyMixed(ws, msg, [{ type: 'record', data: { file: 'file://' + mp3 } }]);
+        const txt = voiceText(pick.textId);
+        const label = who || (INDEX ? ((INDEX.characters.find((c) => c.id === pick.char) || {}).name || '') : '');
+        if (txt) return replyText(ws, msg, `${label}："${txt}"`);
+        return replyText(ws, msg, `${label}：（这条语音没有文本）`);
+      } catch (e) {
+        lastErr = e;
+        console.error('[on] 语音失败:', pick.soundId, errText(e));
+      }
+    }
+    return replyText(ws, msg, '语音取不到：' + errText(lastErr || new Error('未知错误')));
+  }
+
+  // ---------------- 小漫画（加载漫画） ----------------
+  const COMIC_DIR = path.join(ON_DIR, 'art', 'comic');
+  let COMIC_BUNDLES = null;
+  let COMICS = null;
+
+  /** 包名清单：comic_001_1 → image_assets_image_comic_comic_001_1_<hash>.bundle */
+  function comicBundleName(asset) {
+    if (!COMIC_BUNDLES) {
+      COMIC_BUNDLES = {};
+      try {
+        const inv = JSON.parse(fs.readFileSync(path.join(ON_DIR, 'bundle_inventory.json'), 'utf8'));
+        const list = Array.isArray(inv) ? inv : (inv.names || inv.bundles || []);
+        for (const n of list) {
+          const m = /^image_assets_image_comic_(.+)_[0-9a-f]{32}\.bundle$/.exec(String(n));
+          if (m) COMIC_BUNDLES[m[1]] = String(n);
+        }
+      } catch (e) { console.error('[on] 漫画包清单读取失败:', errText(e)); }
+    }
+    return COMIC_BUNDLES[asset] || null;
+  }
+
+  function comics() {
+    if (COMICS) return COMICS;
+    COMICS = [];
+    try {
+      const j = JSON.parse(fs.readFileSync(path.join(ON_DIR, 'master', 'MasterLoadingComics.json'), 'utf8'));
+      COMICS = (j._allData || []).map((r) => ({
+        id: r._id, asset: r._imageAsset, chars: r._characterIds || [], order: r._order,
+      })).filter((c) => c.asset);
+    } catch (e) { console.error('[on] 漫画表读取失败:', errText(e)); }
+    return COMICS;
+  }
+
+  /** 取漫画 PNG（缓存到 data/on/art/comic/<asset>.png；没有就下载包并解出图片） */
+  async function ensureComic(asset) {
+    const out = path.join(COMIC_DIR, asset + '.png');
+    if (fs.existsSync(out) && fs.statSync(out).size > 1024) return out;
+    const bname = comicBundleName(asset);
+    if (!bname) throw new Error(`没有 ${asset} 的漫画包`);
+    fs.mkdirSync(COMIC_DIR, { recursive: true });
+    const tmp = path.join('/tmp', bname);
+    await curl(`${SONGS.cdn}/${bname}`, tmp, SONGS.auth);
+    try {
+      const { Bundle } = require(path.join(ON_DIR, 'unitysrc', 'bundle.js'));
+      const { exportObject } = require(path.join(ON_DIR, 'unitysrc', 'exporter.js'));
+      const b = Bundle.load(tmp);
+      const objs = b.listObjects();
+      // 必须先试 Sprite：Texture2D 是整张图集（含留白、方向也不对）
+      const cand = objs.filter((e) => e.className === 'Sprite')
+        .concat(objs.filter((e) => e.className === 'Texture2D'));
+      for (const e of cand) {
+        const r = await exportObject(b, e);
+        if (r && r.ext === '.png' && r.data) {
+          fs.writeFileSync(out, r.data);
+          console.log(`[on] 漫画解出 ${asset} <- ${e.className} ${r.name}`
+            + (r.meta ? ` ${r.meta.width}x${r.meta.height}（图集 ${r.meta.sourceSize} rot=${r.meta.packingRotation}）` : ''));
+          return out;
+        }
+      }
+      throw new Error('漫画包里没有图片对象');
+    } finally { try { fs.unlinkSync(tmp); } catch (e) {} }
+  }
+
+  async function handleComic(ws, msg, arg) {
+    const q = String(arg || '').trim();
+    const list = comics();
+    if (!list.length) return replyText(ws, msg, '漫画数据缺失（先让管理员跑 /on更新 主数据）');
+    let pool = list;
+    let who = '';
+    if (q) {
+      const ch = resolveCharacter(q);
+      if (!ch) {
+        const names = INDEX ? INDEX.characters.map((c) => c.name).join('、') : '';
+        return replyText(ws, msg, `没有找到角色「${q}」。可用角色：${names}`);
+      }
+      pool = list.filter((c) => c.chars.indexOf(ch.id) >= 0);
+      who = ch.name;
+      if (!pool.length) return replyText(ws, msg, `「${ch.name}」还没有加载漫画`);
+    }
+    const pick = pool[Math.floor(Math.random() * pool.length)];
+    try {
+      const png = await ensureComic(pick.asset);
+      return replyImage(ws, msg, png);
+    } catch (e) {
+      console.error('[on] 漫画失败:', errText(e));
+      return replyText(ws, msg, '漫画取不到：' + errText(e));
+    }
   }
 
   // ---------------- 难度排行
@@ -1033,6 +1276,8 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
   // ---------------- 匹配注册
   const defs = [
     { re: /^\s*\/on(?:card|查卡)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleCard(ws, msg, m[1] || '') },
+    { re: /^\s*\/on(?:voice|语音|听)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleVoice(ws, msg, m[1] || '') },
+    { re: /^\s*\/on(?:comic|小漫画|漫画)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleComic(ws, msg, m[1] || '') },
     { re: /^\s*\/on(?:rank|难度排行|排行)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleRank(ws, msg, m[1] || '') },
     { re: /^\s*\/on(?:benefit|效益排行|效益)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleEff(ws, msg, m[1] || '', 'benefit') },
     { re: /^\s*\/on(?:efficiency|eff|效率排行|效率)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleEff(ws, msg, m[1] || '', 'eff') },
@@ -1061,7 +1306,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     });
   }
 
-  console.log('Our Notes 指令已注册: /on查卡 /oncard /on查曲 /on听曲 /on谱面预览 /on查谱面 /on卡池 /on贴纸 /on难度排行 /on效益排行 /on效率排行 /on添加别名 /on待审核 /on通过 /on阻止 /on更新 /onhelp'
+  console.log('Our Notes 指令已注册: /on查卡 /oncard /on查曲 /on听曲 /on听 /on谱面预览 /on查谱面 /on小漫画 /on卡池 /on贴纸 /on难度排行 /on效益排行 /on效率排行 /on添加别名 /on待审核 /on通过 /on阻止 /on更新 /onhelp'
     + `（角色 ${INDEX ? INDEX.characters.length : 0} / 卡片 ${INDEX ? INDEX.cards.length : 0} / 曲目 ${SONGS ? SONGS.songs.length : 0}`
     + `，别名 ${Object.keys(ALIASES).length} 条，CRI密钥 ${process.env.ON_CRI_KEY ? '已配置' : '未配置'}）`);
 }

@@ -1,7 +1,7 @@
 # Our Notes 指令模块（BanG Dream! Our Notes）
 
 `on_commands.js`：手游 **BanG Dream! Our Notes** 的 QQ 机器人指令模块（OneBot v11）——
-查卡、查曲、听曲（含完整版）、谱面预览与难度排行、卡池、贴纸、小漫画、效益 / 效率排行……
+查卡、查曲、听曲（含完整版）、角色语音、谱面预览与难度排行、卡池、贴纸、小漫画、效益 / 效率排行……
 
 > 非官方粉丝项目。游戏素材与数据版权归 **Bushiroad / Craft Egg / Ishimori** 所有。
 > 本仓库只包含**指令模块与配套工具**，不含任何游戏素材、主数据或解密密钥。
@@ -27,7 +27,7 @@ register({
 ## 仓库内容
 
 ```
-on_commands.js          /on* 指令实现（查卡 / 查曲 / 听曲 / 谱面 / 排行 / 卡池 / 贴纸 / 小漫画 …）
+on_commands.js          /on* 指令实现（查卡 / 查曲 / 听曲 / 角色语音 / 谱面 / 排行 / 卡池 / 贴纸 / 小漫画 …）
 lib/secrets.js|.py      密钥读取（环境变量 → secrets.json）
 tools/
   on_update.js          资源包增量更新（catalog hash → bundle diff → 下载解密）
@@ -42,7 +42,8 @@ tools/
   hca_dec.c             CRI HCA 解码器（直接驱动 clHCA，含 per-file 密钥推导）
   hca_decode.py         定位 HCA/AWB/ACB 并调 hca_dec
   clhca.c/.h/_data.h    vgmstream 的 clHCA（上游实现，见下）
-  cri_url.py            catalog → CRI 音频包 URL 映射
+  cri_url.py            catalog → CRI 音频包 URL 映射（角色语音用）
+  acb_cues.py           ACB → 按 cue 名取出音轨并解码（角色语音用）
   audio_selftest.js     全曲音频自检（走与指令相同的代码路径）
   grpc_probe.js         gRPC 免登录方法面探测
 data/on/
@@ -74,6 +75,7 @@ node tools/on_update.js --apply   # 资源包 → data/on/art/…、音频
 node tools/on_master.js --apply   # 主数据 → data/on/master/*.json（并重建 songs.json / index.json）
 node tools/fetch_charts.js        # 谱面缓存 → data/on/chart/*.json
 python3 tools/build_score.py      # 效益 / 效率排行数据 → data/on/score.json
+python3 tools/cri_url.py          # CRI 音频包映射 → data/on/cri_url.json（角色语音用）
 
 # 4) 接进宿主后即可使用（tests/ 里的脚本连的是宿主的 OneBot 端口）
 ```
@@ -93,7 +95,7 @@ python3 tools/build_score.py      # 效益 / 效率排行数据 → data/on/scor
 | `bundleSeed` | `ON_BUNDLE_SEED` | 同一套 AES-CTR 的 nonce 种子（16 位 hex）：每个包的 nonce = `SHA256(seed ‖ 包文件名)[0:8]`，且只加密每个包的前 16 KB | 同上 | 同 `bundleKey`（两者成对使用） |
 | `masterKey` | `ON_MASTER_KEY` | 主数据表密钥（64 位 hex）；算法是 Rijndael-256-CBC（Nb=8），不是 AES | 客户端解密逻辑里的常量 | `data/on/master/*.json` 解不开，查卡 / 查曲 / 卡池 / 贴纸 / 查谱面没有数据 |
 | `masterIv` | `ON_MASTER_IV` | 主数据表 CBC 的初始向量（64 位 hex）；每个 `.bin` 的前 64 字节是明文头（32 字节固定前缀 + IV），密文从第 64 字节起 | 同上 | 同 `masterKey` |
-| `hcaBaseKey` | `ON_HCA_BASE_KEY` | HCA 音频的基础密钥（hex）；单个文件的实际密钥 = 基础密钥 × 该文件自己的 subkey，而 subkey 存在音频文件头里（AFS2 `+0x0E`） | 客户端解密逻辑里的常量 | 「听曲」与 `tools/hca_dec` 无法解码 |
+| `hcaBaseKey` | `ON_HCA_BASE_KEY` | HCA 音频的基础密钥（hex）；单个文件的实际密钥 = 基础密钥 × 该文件自己的 subkey，而 subkey 存在音频文件头里（AFS2 `+0x0E`） | 客户端解密逻辑里的常量 | 「听曲」「角色语音」与 `tools/hca_dec` 无法解码 |
 | `cdnAuth` | `ON_CDN_AUTH` | 访问官方 CDN 的 HTTP Basic 凭据（`user:pass`）；六项里唯一属于服务凭据、而非客户端内置常量的一项 | 客户端请求 CDN 时携带的 `Authorization: Basic …` 头 | `tools/on_update.js`、`tools/on_master.js` 无法下载资源 |
 | `admin` | `ON_ADMIN` | 本模块的管理员 QQ（别名登记、资源更新等指令用） | 部署方填写 | 管理类指令不可用 |
 
