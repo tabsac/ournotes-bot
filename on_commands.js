@@ -1463,6 +1463,10 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
   const GAME_TTL_MS = 30 * 60 * 1000;          // 兜底：半小时没动静就作废（正常有一分钟时限）
   const GAME_MS = 60 * 1000;                   // 一局时限：谜面（全部素材）发完开始计时 1 分钟
   const GAME_KIND = { card: '猜卡', song: '猜曲', voice: '猜语音' };
+  // 正在准备谜面的会话（猜曲要下完整版，可能十几秒）：这段时间里不许再开新的一局，
+  // 否则两次请求会各自准备、后一局把前一局顶掉（短间隔连点就会看到两条谜面）
+  const GAME_PREPARING = new Map();            // key -> { type, at }
+  const PREPARE_TTL_MS = 3 * 60 * 1000;        // 兜底：卡死的准备状态三分钟后自动失效
   const GAME_GIVEUP_AT = 6;                    // 答错几次自动公布答案（中途不再提示）
   const CARD_CROP = { 大: 240, 中: 160, 小: 100, 简单: 240, 普通: 160, 困难: 100, 难: 100, 易: 240 };
   const CLIP_SECONDS = 3;
@@ -1637,6 +1641,24 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
   };
 
   /** 这个会话已经有进行中的一局？有就提示并返回它（三个猜不能同时进行） */
+  /** 开局统一入口：已有进行中的一局 / 正在准备 → 提示并返回；否则占住坑再准备 */
+  async function withPrepare(ws, msg, type, fn) {
+    const key = gameKey(msg);
+    if (busyRound(ws, msg)) return null;
+    const p = GAME_PREPARING.get(key);
+    if (p && Date.now() - p.at < PREPARE_TTL_MS) {
+      const extra = p.type === 'song' ? '（猜曲要下完整版，可能要十几秒）' : '';
+      replyText(ws, msg, `「${GAME_KIND[p.type]}」的谜面还在准备中${extra}，出来会直接发出来，稍等一下。`);
+      return null;
+    }
+    GAME_PREPARING.set(key, { type: type, at: Date.now() });
+    try {
+      return await fn();
+    } finally {
+      GAME_PREPARING.delete(key);
+    }
+  }
+
   function busyRound(ws, msg) {
     const r = roundOf(msg);
     if (!r) return null;
@@ -1692,7 +1714,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
   /** 猜卡：随机一张非 R 卡，剪卡面极小一块当谜面 */
   async function handleGuessCard(ws, msg, arg) {
     if (!INDEX) return replyText(ws, msg, '卡片数据缺失（先让管理员跑 /on更新 主数据）');
-    if (busyRound(ws, msg)) return;
+    return withPrepare(ws, msg, 'card', async () => {
     const key = String(arg || '').trim();
     let size = CARD_CROP['中'];
     if (key) {
@@ -1714,13 +1736,14 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
       } catch (e) { /* 这张没有完整卡面，换一张 */ }
     }
     return replyText(ws, msg, '拿不到可用的卡面，稍后再试。');
+    });
   }
 
   /** 猜曲：纯随机抽一首（不看有没有缓存），**直接用完整版**剪 3 秒
    *  （完整版只当剪片段的素材，收局不发它） */
   async function handleGuessSong(ws, msg) {
     if (!SONGS || !SONGS.songs.length) return replyText(ws, msg, '曲目数据缺失（先让管理员跑 /on更新 主数据）');
-    if (busyRound(ws, msg)) return;
+    return withPrepare(ws, msg, 'song', async () => {
     const all = SONGS.songs.filter((s) => s.acbBundle);
     let lastErr = null;
     for (let i = 0; i < 3; i++) {
@@ -1738,13 +1761,14 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
       }
     }
     return replyText(ws, msg, '音频拿不到，稍后再试。' + (lastErr ? '（' + errText(lastErr) + '）' : ''));
+    });
   }
 
   /** 猜语音：随机一条角色语音，剪 3 秒 */
   async function handleGuessVoice(ws, msg) {
     const all = voices();
     if (!all.length) return replyText(ws, msg, '语音数据缺失（先让管理员跑 /on更新 主数据）');
-    if (busyRound(ws, msg)) return;
+    return withPrepare(ws, msg, 'voice', async () => {
     const usable = [];
     for (const v of all) {
       const info = soundMap().get(v.soundId) || {};
@@ -1771,6 +1795,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
       }
     }
     return replyText(ws, msg, '语音拿不到，稍后再试。' + (lastErr ? '（' + errText(lastErr) + '）' : ''));
+    });
   }
 
   /** 卡面整图（公布答案时一起发） */
@@ -1823,7 +1848,14 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
   async function handleAnswer(ws, msg, arg) {
     const guess = String(arg || '').trim();
     const r = roundOf(msg);
-    if (!r) return replyText(ws, msg, '现在没有进行中的游戏。发 /on猜卡、/on猜曲 或 /on猜语音 开一局。');
+    if (!r) {
+      const prep = GAME_PREPARING.get(gameKey(msg));
+      if (prep) {
+        const extra = prep.type === 'song' ? '（猜曲要下完整版，可能要十几秒）' : '';
+        return replyText(ws, msg, `「${GAME_KIND[prep.type]}」的谜面还在准备中${extra}，等它发出来再答。`);
+      }
+      return replyText(ws, msg, '现在没有进行中的游戏。发 /on猜卡、/on猜曲 或 /on猜语音 开一局。');
+    }
     if (!guess) return replyText(ws, msg, '用法：/回答 <你猜的名字>（/答、/猜 同义）');
     const hit = guessHit(guess, r.answer.accept);
     if (hit) {
@@ -1852,7 +1884,11 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
 
   async function handleEnd(ws, msg) {
     const r = roundOf(msg);
-    if (!r) return replyText(ws, msg, '现在没有进行中的游戏。');
+    if (!r) {
+      const prep = GAME_PREPARING.get(gameKey(msg));
+      if (prep) return replyText(ws, msg, `「${GAME_KIND[prep.type]}」的谜面还在准备中，等它出来再结束吧。`);
+      return replyText(ws, msg, '现在没有进行中的游戏。');
+    }
     dropRound(gameKey(msg));
     return revealRound(ws, msg, r, '这局结束了，');
   }
