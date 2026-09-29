@@ -8,6 +8,12 @@
     <base>/cri_assets_cri/sound/voicesystem_01_67752781e724d3b0fa1f04c2d6cc37d1
 （没有 .bundle 后缀，所以不在 .bundle inventory 里）
 
+只覆盖其中一套打包方式：01–10 / 21–25 这类 cue sheet 的 ACB 是**独立 raw 资源**，
+catalog 里有 location；11–20 那批（VoiceSystem_11…20、VoiceLive_11…20）的 catalog 里
+没有 location，ACB 是**内嵌在 bundle 里**的（cri_assets_cri_sound_<sheet>_<hash>.bundle
+里的 MonoBehaviour），所以本脚本产出的映射里就没有它们 —— 这部分由指令侧回退到
+bundle 路线（见 tools/verify_voicepacks.js 的校验）。
+
 catalog 的字符串格式是 [u32 长度][字节]（不是 7-bit 变长长度 —— 这点踩过坑）。
 
     cri_url.py --catalog <bin> [--out data/on/cri_url.json] [--check]

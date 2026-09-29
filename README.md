@@ -44,6 +44,7 @@ tools/
   clhca.c/.h/_data.h    vgmstream 的 clHCA（上游实现，见下）
   cri_url.py            catalog → CRI 音频包 URL 映射（角色语音用）
   acb_cues.py           ACB → 按 cue 名取出音轨并解码（角色语音用）
+  verify_voicepacks.js  角色语音音频包全量校验（两条打包路线各取一次）
   audio_selftest.js     全曲音频自检（走与指令相同的代码路径）
   grpc_probe.js         gRPC 免登录方法面探测
 data/on/

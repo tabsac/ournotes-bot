@@ -754,6 +754,34 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
   const CRI_DIR = path.join('/tmp', 'on_cri');
   let SOUND_MAP = null;      // soundId -> {cue, sheet, textId}
   let VOICES = null;         // [{char, soundId, textId, from}]
+  let BUNDLE_NAMES = null;   // bundle_inventory.json 里的包名清单
+
+  function bundleNames() {
+    if (BUNDLE_NAMES) return BUNDLE_NAMES;
+    BUNDLE_NAMES = [];
+    try {
+      const inv = readJson(path.join(ON_DIR, 'bundle_inventory.json'), {});
+      BUNDLE_NAMES = (Array.isArray(inv) ? inv : (inv.names || inv.bundles || [])) || [];
+    } catch (e) { console.error('[on] 资源包清单读取失败:', errText(e)); }
+    return BUNDLE_NAMES;
+  }
+
+  /** 一个 cue sheet 的音频包位置。两套打包方式：
+   *  ① 独立 raw ACB —— catalog 里有 location，cri_url.json 给出公开 URL（不带 .bundle 后缀，无需凭据）
+   *  ② 内嵌在 bundle 里 —— catalog 里没有 location，ACB 作为 MonoBehaviour 装在
+   *     cri_assets_cri_sound_<sheet>_<hash>.bundle 中（下载要走 CDN 凭据）
+   *  返回 { url } / { bundle }，都没有就是 null。 */
+  function voicePack(sheetName) {
+    const key = String(sheetName || '').toLowerCase();
+    if (!key) return null;
+    const hit = (CRI_URL[sheetName] || CRI_URL[key] || [])[0];
+    if (hit && hit.url) return { url: hit.url };
+    const pre = 'cri_assets_cri_sound_' + key + '_';
+    for (const n of bundleNames()) {
+      if (n.startsWith(pre) && /^[0-9a-f]{32}\.bundle$/.test(n.slice(pre.length))) return { bundle: n };
+    }
+    return null;
+  }
 
   /** soundId → cue 名 + cueSheet（MasterSound / MasterSoundCueSheet），顺带带出文本 id */
   function soundMap() {
@@ -806,14 +834,27 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
   }
 
   /** 取一条语音的 mp3（缓存 data/on/audio/voice/<soundId>.mp3） */
-  async function ensureVoice(v, cueUrl) {
+  async function ensureVoice(v, pack) {
     fs.mkdirSync(VOICE_DIR, { recursive: true });
     const mp3 = path.join(VOICE_DIR, v.soundId + '.mp3');
     if (fs.existsSync(mp3) && fs.statSync(mp3).size > 2048) return mp3;
     fs.mkdirSync(CRI_DIR, { recursive: true });
     const acb = path.join(CRI_DIR, v.sheetName + '.acb');
     if (!fs.existsSync(acb) || fs.statSync(acb).size < 10240) {
-      await curl(cueUrl, acb, null);                 // CRI 音频包是公开的，不带 CDN 凭据
+      if (pack.bundle) {
+        const bfile = path.join(CRI_DIR, pack.bundle);
+        if (!fs.existsSync(bfile) || fs.statSync(bfile).size < 102400) {
+          await curl(`${SONGS.cdn}/${pack.bundle}`, bfile, SONGS.auth);
+        }
+        const { Bundle } = require(path.join(ON_DIR, 'unitysrc', 'bundle.js'));
+        const { acbFromBundle } = require(path.join(__dirname, 'tools', 'acb.js'));
+        const bytes = acbFromBundle(Bundle.load(bfile));
+        if (!bytes || bytes.length < 10240) throw new Error(`${v.sheetName} 的包里没有 ACB`);
+        fs.writeFileSync(acb, bytes);
+        try { fs.unlinkSync(bfile); } catch (e) {}          // 4 MB 的包留着没用，ACB 已经拿到
+      } else {
+        await curl(pack.url, acb, null);                    // 独立 CRI 音频包是公开的，不带 CDN 凭据
+      }
     }
     const wav = path.join(CRI_DIR, v.soundId + '.wav');
     await new Promise((res, rej) => {
@@ -852,15 +893,15 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
       who = ch.name;
       if (!pool.length) return replyText(ws, msg, `「${ch.name}」还没有语音`);
     }
-    if (!Object.keys(CRI_URL).length) {
+    if (!Object.keys(CRI_URL).length && !bundleNames().length) {
       return replyText(ws, msg, '音频包映射表缺失（先跑 tools/cri_url.py 生成 cri_url.json）');
     }
-    // 只有音频包已收录的语音才能播放，先筛掉其余条目再随机
+    // 只有音频包拿得到的语音才能播放，先筛掉其余条目再随机
     const usable = [];
     for (const v of pool) {
       const info = soundMap().get(v.soundId) || {};
-      const hit = (CRI_URL[String(info.sheet || '').toLowerCase()] || [])[0];
-      if (hit && hit.url) usable.push({ v: v, cue: info.cue, sheet: info.sheet, url: hit.url });
+      const pack = voicePack(info.sheet);
+      if (pack) usable.push({ v: v, cue: info.cue, sheet: info.sheet, pack: pack });
     }
     if (!usable.length) {
       return replyText(ws, msg, q ? `「${who}」的语音包还没收录（跑 tools/cri_url.py 更新 cri_url.json）`
@@ -874,7 +915,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     for (const item of usable.slice(0, 4)) {
       const pick = item.v;
       try {
-        const mp3 = await ensureVoice({ soundId: pick.soundId, cueName: item.cue, sheetName: item.sheet }, item.url);
+        const mp3 = await ensureVoice({ soundId: pick.soundId, cueName: item.cue, sheetName: item.sheet }, item.pack);
         replyMixed(ws, msg, [{ type: 'record', data: { file: 'file://' + mp3 } }]);
         const txt = voiceText(pick.textId);
         const label = who || (INDEX ? ((INDEX.characters.find((c) => c.id === pick.char) || {}).name || '') : '');
