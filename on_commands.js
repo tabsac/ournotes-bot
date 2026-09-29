@@ -45,6 +45,7 @@ const CHART_DIR = path.join(ON_DIR, 'chart');
 const AUDIO_DIR = path.join(ON_DIR, 'audio');
 const ALIAS_FILE = path.join(ON_DIR, 'aliases.json');
 const CHAR_ALIAS_FILE = path.join(ON_DIR, 'char_aliases.json');   // 角色别名（/on角色别名）
+const SCORE_FILE = path.join(ON_DIR, 'game_score.json');          // 小游戏战绩：QQ → 答对次数
 const ADMIN = String(process.env.ON_ADMIN || require(path.join(__dirname, 'lib', 'secrets.js')).get('admin') || '');
 const RENDER_TIMEOUT_MS = 90 * 1000;
 const withBundle = (n) => (String(n || '').endsWith('.bundle') ? String(n) : String(n || '') + '.bundle');
@@ -95,6 +96,7 @@ INDEX = readJson(path.join(ON_DIR, 'index.json'), null);
 SONGS = readJson(path.join(ON_DIR, 'songs.json'), null);
 ALIASES = readJson(ALIAS_FILE, {});
 CHAR_ALIASES = readJson(CHAR_ALIAS_FILE, {}) || {};
+let SCORE = readJson(SCORE_FILE, {}) || {};   // 小游戏战绩：按 QQ 记答对次数
 // 别名审核队列：加别名立即可用并进 pending；被 /on阻止 的进 blocked
 // （黑名单按 类型 + 曲目 + 别名 记，别的曲子还能用同一个别名）
 const REVIEW_FILE = path.join(ON_DIR, 'alias_review.json');
@@ -113,6 +115,11 @@ function saveReview() {
 function saveAliases() {
   try { fs.writeFileSync(ALIAS_FILE, JSON.stringify(ALIASES, null, 1)); return true; }
   catch (e) { console.error('[on] 别名写入失败:', e.message); return false; }
+}
+
+function saveScore() {
+  try { fs.writeFileSync(SCORE_FILE, JSON.stringify(SCORE, null, 1)); return true; }
+  catch (e) { console.error('[on] 战绩写入失败:', e.message); return false; }
 }
 
 function saveCharAliases() {
@@ -649,7 +656,8 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
       '答：/回答 <角色名>；放弃就 /结束。'],
     '回答': ['/回答（/答、/猜 同义）',
       '用法 /回答 <答案>',
-      '回答 /on猜卡、/on猜曲、/on猜语音 开的那一局，答错可以继续答，3 次后会提示，6 次未果自动公布答案。'],
+      '回答 /on猜卡、/on猜曲、/on猜语音 开的那一局，答错可以继续答，3 次后会提示，6 次未果自动公布答案。',
+      '答对会记一次战绩（按 QQ），并回一句「你答对过 N 次」。'],
     '结束': ['/结束（/放弃 同义）',
       '用法 /结束',
       '结束当前这一局并公布答案（猜卡会连完整卡面一起发出来）。'],
@@ -1594,17 +1602,8 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     return replyText(ws, msg, '拿不到可用的卡面，稍后再试。');
   }
 
-  /** 猜曲取音频：先试听包（小、快），拿不到再抓完整版 */
-  async function songAudioFor(song) {
-    try {
-      return await ensureAudio(song, { short: true });
-    } catch (e) {
-      console.error('[on] 试听包取不到，改抓完整版:', errText(e));
-      return await ensureAudio(song);
-    }
-  }
-
-  /** 猜曲：纯随机抽一首（不看有没有缓存），剪 3 秒 */
+  /** 猜曲：纯随机抽一首（不看有没有缓存），**直接用完整版**剪 3 秒
+   *  （完整版只当剪片段的素材，收局不发它） */
   async function handleGuessSong(ws, msg) {
     if (!SONGS || !SONGS.songs.length) return replyText(ws, msg, '曲目数据缺失（先让管理员跑 /on更新 主数据）');
     const all = SONGS.songs.filter((s) => s.acbBundle);
@@ -1613,7 +1612,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
       const song = all[Math.floor(Math.random() * all.length)];
       const out = path.join('/tmp', `guess_song_${song.id}_${Math.random().toString(36).slice(2, 8)}.mp3`);
       try {
-        const mp3 = await songAudioFor(song);
+        const mp3 = await ensureAudio(song);          // 直接抓完整版
         await clipAudio(mp3, out);
         const r = { type: 'song', answer: { label: songLabel(song), accept: songNames(song), song: song.id },
           hint: `提示：这首歌来自 ${bandNameOf(song)}` };
@@ -1694,8 +1693,9 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
 
   const songOf = (id) => (SONGS && SONGS.songs.find((s) => String(s.id) === String(id))) || null;
 
-  /** 收局：文字 + 完整语音 / 原文 / 曲绘 / 完整卡面，能一条发就一条发 */
-  async function revealRound(ws, msg, r, why) {
+  /** 收局：文字 + 完整语音 / 原文 / 曲绘 / 完整卡面，能一条发就一条发。
+   *  猜曲只发曲绘，**不发完整版歌曲**（完整版只当剪 3 秒的素材）。 */
+  async function revealRound(ws, msg, r, why, note) {
     const segs = [];
     let text = `${why}答案是「${r.answer.label}」。`;
     let art = null;
@@ -1706,26 +1706,15 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
       const p = path.join(VOICE_DIR, r.voice.soundId + '.mp3');     // 完整语音（谜面就是从它剪的）
       if (fs.existsSync(p)) audio = p;
     } else if (r.type === 'song' && r.answer.song) {
-      art = jacketOf(r.answer.song);
-      const p = path.join(AUDIO_DIR, `${r.answer.song}.mp3`);       // 完整版；没下过就下面现抓
-      if (fs.existsSync(p)) audio = p;
+      art = jacketOf(r.answer.song);                                // 只给曲绘
     } else if (r.type === 'card' && r.answer.card) {
       art = fullArtOf(r.answer.card);
     }
+    if (note) text += `\n${note}`;
     segs.push({ type: 'text', data: { text: text } });
     if (art) segs.push(mediaSeg('image', art));
     if (audio) segs.push(mediaSeg('record', audio));
     replyMixed(ws, msg, segs);
-    if (r.type === 'song' && !audio) {
-      const song = songOf(r.answer.song);
-      if (!song) return;
-      try {
-        const mp3 = await ensureAudio(song);                        // 先抓完整版，抓到再补一条
-        replyMixed(ws, msg, [mediaSeg('record', mp3)]);
-      } catch (e) {
-        console.log('[on] 完整版取不到:', errText(e));
-      }
-    }
   }
 
   async function handleAnswer(ws, msg, arg) {
@@ -1736,8 +1725,19 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     const hit = guessHit(guess, r.answer.accept);
     if (hit) {
       dropRound(gameKey(msg));
+      const uid = String((msg.sender && msg.sender.user_id) || '');
+      let note = '';
+      if (uid) {
+        const rec = SCORE[uid] || (SCORE[uid] = { win: 0 });
+        rec.win = Number(rec.win || 0) + 1;
+        rec[r.type] = Number(rec[r.type] || 0) + 1;
+        rec.name = (msg.sender && (msg.sender.card || msg.sender.nickname)) || rec.name || '';
+        rec.at = new Date().toISOString();
+        saveScore();
+        note = `你答对过 ${rec.win} 次`;
+      }
       return revealRound(ws, msg, r, `答对了！${hit.how ? hit.how + '，' : ''}` +
-        (r.tries ? `（第 ${r.tries + 1} 次猜中）` : ''));
+        (r.tries ? `（第 ${r.tries + 1} 次猜中）` : ''), note);
     }
     r.tries++;
     if (r.tries >= GAME_GIVEUP_AT) {
