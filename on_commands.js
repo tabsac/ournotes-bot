@@ -23,7 +23,7 @@
  *  小游戏
  *    /on猜卡 [大|中|小]          卡面剪一小块，猜角色（R 卡不参与）
  *    /on猜曲 /on猜语音           听 3 秒，猜曲名 / 猜角色
- *    /on回答 <答案> /on结束       答题 / 放弃（模糊匹配 + 别名都算对）
+ *    /回答 <答案>（/答、/猜）      答题；/结束 放弃（模糊匹配 + 别名都算对）
  *  管理（不进 help）
  *    /待审核                    列出待审核队列（曲子别名 + 角色别名）
  *    /通过 <标号…|全部>          通过
@@ -566,8 +566,8 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     '/on猜卡 [大|中|小]            只看卡面的一小块，猜是哪个角色（R 卡不参与）',
     '/on猜曲                       听 3 秒音频，猜是哪首歌',
     '/on猜语音                     听 3 秒语音，猜是哪个角色',
-    '/on回答 <答案>                回答当前这一局',
-    '/on结束                       放弃这一局并公布答案',
+    '/回答 <答案>                  回答当前这一局（/答、/猜 同义）',
+    '/结束                         放弃这一局并公布答案',
     '　猜答案不用一字不差，写别名或很接近的写法都算对。',
     '',
     '【其它】',
@@ -638,20 +638,20 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
       '用法 /on猜卡 [大|中|小]',
       '随机抽一张非 R 卡，只发卡面里极小的一块（默认 160px，约卡面的十分之一），猜这是哪个角色。',
       '　大 = 240px 好认一点　中 = 160px（默认）　小 = 100px 更难',
-      '答：/on回答 <角色名>（别名、日文名、写得很接近都算对）；放弃就 /on结束。'],
+      '答：/回答 <角色名>（/答、/猜 同义；别名、日文名、写得很接近都算对）；放弃就 /结束。'],
     '猜曲': ['/on猜曲（/onguesssong）',
       '用法 /on猜曲',
       '随机抽一首曲子，发其中 3 秒音频，猜曲名。',
-      '答：/on回答 <曲名>（别名与相近写法都算对）；放弃就 /on结束。'],
+      '答：/回答 <曲名>（别名与相近写法都算对）；放弃就 /结束。'],
     '猜语音': ['/on猜语音（/onguessvoice）',
       '用法 /on猜语音',
       '随机抽一条角色语音，发其中 3 秒，猜是哪个角色。',
-      '答：/on回答 <角色名>；放弃就 /on结束。'],
-    '回答': ['/on回答（/onanswer）',
-      '用法 /on回答 <答案>',
+      '答：/回答 <角色名>；放弃就 /结束。'],
+    '回答': ['/回答（/答、/猜 同义）',
+      '用法 /回答 <答案>',
       '回答 /on猜卡、/on猜曲、/on猜语音 开的那一局，答错可以继续答，3 次后会提示，6 次未果自动公布答案。'],
-    '结束': ['/on结束（/onend）',
-      '用法 /on结束',
+    '结束': ['/结束（/放弃 同义）',
+      '用法 /结束',
       '结束当前这一局并公布答案（猜卡会连完整卡面一起发出来）。'],
   };
 
@@ -674,7 +674,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     'guesscard': '猜卡', '猜卡': '猜卡', 'gcard': '猜卡',
     'guesssong': '猜曲', '猜曲': '猜曲', 'gsong': '猜曲',
     'guessvoice': '猜语音', '猜语音': '猜语音', 'gvoice': '猜语音',
-    'answer': '回答', '回答': '回答', '答': '回答',
+    'answer': '回答', '回答': '回答', '答': '回答', '猜': '回答',
     'end': '结束', '结束': '结束', '放弃': '结束',
     'help': '帮助', '帮助': '帮助', '说明': '帮助',
   };
@@ -1442,8 +1442,9 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     });
   }
 
-  // ---------------- 小游戏：/on猜卡 /on猜曲 /on猜语音 + /on回答 /on结束
-  // 一局一题，按会话（群 / 私聊）存；答对或 /on结束 收局。答案用「模糊匹配 + 别名」判定。
+  // ---------------- 小游戏：/on猜卡 /on猜曲 /on猜语音 + /回答（/答、/猜）/结束
+  // 一局一题，按会话（群 / 私聊）存；答对或 /结束 收局。答案用「模糊匹配 + 别名」判定。
+  // 谜面与文字同一条发出；收局给完整语音 / 原文 / 曲绘 / 完整卡面。
   const GAMES = new Map();                     // 'g:<群号>' / 'p:<QQ>' -> 当前这一局
   const GAME_TTL_MS = 30 * 60 * 1000;          // 半小时没动静就作废
   const GAME_KIND = { card: '猜卡', song: '猜曲', voice: '猜语音' };
@@ -1543,14 +1544,16 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
   }
 
   const guessPrompt = (r) => {
-    const head = r.type === 'song' ? '听 3 秒，猜猜是哪首歌'
-      : r.type === 'voice' ? '听 3 秒，猜猜这是哪个角色的语音'
-        : '看这一小块卡面，猜猜是哪个角色';
-    return `${GAME_KIND[r.type]}：${head}\n发 /on回答 <答案>，放弃就发 /on结束。`;
+    const head = r.type === 'song' ? '听 3 秒，这是哪首歌？'
+      : r.type === 'voice' ? '听 3 秒，这是哪个角色？'
+        : '这是哪张卡的角色？';
+    return `${GAME_KIND[r.type]}：${head}\n发 /回答 <答案>（/答、/猜 同义），放弃发 /结束`;
   };
 
-  /** 开一局：记状态 → 发提示文字 → 发谜面（图片或语音） */
-  function openRound(ws, msg, r, file, segs) {
+  const mediaSeg = (type, f) => ({ type: type, data: { file: 'file://' + f } });
+
+  /** 开一局：记状态 → 谜面与文字**同一条**发出 */
+  function openRound(ws, msg, r, file, seg) {
     dropRound(gameKey(msg));
     sweepGuessTmp();
     r.at = Date.now();
@@ -1558,14 +1561,12 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     r.file = file || null;
     GAMES.set(gameKey(msg), r);
     console.log(`[on] ${GAME_KIND[r.type]}开局 key=${gameKey(msg)} 答案=${r.answer.label}`);
-    replyText(ws, msg, guessPrompt(r));
-    if (segs) {
-      const t = target(msg);
-      sendReply(ws, t.action, Object.assign({}, t.base, { message: segs }));
-    }
+    const t = target(msg);
+    const segs = [];
+    if (seg) segs.push(seg);
+    segs.push({ type: 'text', data: { text: guessPrompt(r) } });
+    sendReply(ws, t.action, Object.assign({}, t.base, { message: segs }));
   }
-
-  const fileSeg = (type, f) => [{ type: type, data: { file: 'file://' + f } }];
 
   /** 猜卡：随机一张非 R 卡，剪卡面极小一块当谜面 */
   async function handleGuessCard(ws, msg, arg) {
@@ -1587,29 +1588,36 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
         await runPy(['guessimg.py', '--id', String(c.id), '--size', String(size), '--out', out], out);
         const r = { type: 'card', answer: { label: ch.name, accept: charNames(ch), char: ch.id, card: c.id },
           hint: `提示：这个角色属于 ${ch.band || '？'}` };
-        return openRound(ws, msg, r, out, fileSeg('image', out));
+        return openRound(ws, msg, r, out, mediaSeg('image', out));
       } catch (e) { /* 这张没有完整卡面，换一张 */ }
     }
     return replyText(ws, msg, '拿不到可用的卡面，稍后再试。');
   }
 
-  /** 猜曲：随机一首曲子，剪 3 秒 */
+  /** 猜曲取音频：先试听包（小、快），拿不到再抓完整版 */
+  async function songAudioFor(song) {
+    try {
+      return await ensureAudio(song, { short: true });
+    } catch (e) {
+      console.error('[on] 试听包取不到，改抓完整版:', errText(e));
+      return await ensureAudio(song);
+    }
+  }
+
+  /** 猜曲：纯随机抽一首（不看有没有缓存），剪 3 秒 */
   async function handleGuessSong(ws, msg) {
     if (!SONGS || !SONGS.songs.length) return replyText(ws, msg, '曲目数据缺失（先让管理员跑 /on更新 主数据）');
     const all = SONGS.songs.filter((s) => s.acbBundle);
-    const cached = all.filter((s) => fs.existsSync(path.join(AUDIO_DIR, `${s.id}.mp3`))
-      || fs.existsSync(path.join(AUDIO_DIR, `${s.id}.short.mp3`)));
-    const pool = cached.length ? cached : all;
     let lastErr = null;
     for (let i = 0; i < 3; i++) {
-      const song = pool[Math.floor(Math.random() * pool.length)];
+      const song = all[Math.floor(Math.random() * all.length)];
       const out = path.join('/tmp', `guess_song_${song.id}_${Math.random().toString(36).slice(2, 8)}.mp3`);
       try {
-        const mp3 = await ensureAudio(song, { short: !cached.length });
-        const info = await clipAudio(mp3, out);
+        const mp3 = await songAudioFor(song);
+        await clipAudio(mp3, out);
         const r = { type: 'song', answer: { label: songLabel(song), accept: songNames(song), song: song.id },
           hint: `提示：这首歌来自 ${bandNameOf(song)}` };
-        return openRound(ws, msg, r, out, fileSeg('record', out));
+        return openRound(ws, msg, r, out, mediaSeg('record', out));
       } catch (e) {
         lastErr = e;
         console.error('[on] 猜曲准备失败:', errText(e));
@@ -1637,10 +1645,11 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
       const out = path.join('/tmp', `guess_voice_${pick.v.soundId}_${Math.random().toString(36).slice(2, 8)}.mp3`);
       try {
         const mp3 = await ensureVoice({ soundId: pick.v.soundId, cueName: pick.info.cue, sheetName: pick.info.sheet }, pick.pack);
-        const info = await clipAudio(mp3, out);
+        await clipAudio(mp3, out);
         const r = { type: 'voice', answer: { label: ch.name, accept: charNames(ch), char: ch.id },
+          voice: { soundId: pick.v.soundId, textId: pick.v.textId },
           hint: `提示：这个角色属于 ${ch.band || '？'}` };
-        return openRound(ws, msg, r, out, fileSeg('record', out));
+        return openRound(ws, msg, r, out, mediaSeg('record', out));
       } catch (e) {
         lastErr = e;
         console.error('[on] 猜语音准备失败:', errText(e));
@@ -1671,29 +1680,64 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     return null;
   }
 
-  function revealRound(ws, msg, r, why) {
-    replyText(ws, msg, `${why}答案是「${r.answer.label}」。`);
-    if (r.type === 'card' && r.answer.card) {
-      const f = fullArtOf(r.answer.card);
-      if (f) replyImage(ws, msg, f);
+  /** 曲绘（jacket） */
+  function jacketOf(songId) {
+    const song = SONGS && SONGS.songs.find((s) => String(s.id) === String(songId));
+    const name = song && song.jacket;
+    if (!name) return null;
+    for (const ext of ['.jpg', '.png', '.jpeg']) {
+      const p = path.join(ON_DIR, 'art', 'jacket', name + ext);
+      if (fs.existsSync(p)) return p;
+    }
+    return null;
+  }
+
+  const songOf = (id) => (SONGS && SONGS.songs.find((s) => String(s.id) === String(id))) || null;
+
+  /** 收局：文字 + 完整语音 / 原文 / 曲绘 / 完整卡面，能一条发就一条发 */
+  async function revealRound(ws, msg, r, why) {
+    const segs = [];
+    let text = `${why}答案是「${r.answer.label}」。`;
+    let art = null;
+    let audio = null;
+    if (r.type === 'voice' && r.voice) {
+      const t = voiceText(r.voice.textId);
+      if (t) text += `\n原文："${t}"`;
+      const p = path.join(VOICE_DIR, r.voice.soundId + '.mp3');     // 完整语音（谜面就是从它剪的）
+      if (fs.existsSync(p)) audio = p;
+    } else if (r.type === 'song' && r.answer.song) {
+      art = jacketOf(r.answer.song);
+      const p = path.join(AUDIO_DIR, `${r.answer.song}.mp3`);       // 完整版；没下过就下面现抓
+      if (fs.existsSync(p)) audio = p;
+    } else if (r.type === 'card' && r.answer.card) {
+      art = fullArtOf(r.answer.card);
+    }
+    segs.push({ type: 'text', data: { text: text } });
+    if (art) segs.push(mediaSeg('image', art));
+    if (audio) segs.push(mediaSeg('record', audio));
+    replyMixed(ws, msg, segs);
+    if (r.type === 'song' && !audio) {
+      const song = songOf(r.answer.song);
+      if (!song) return;
+      try {
+        const mp3 = await ensureAudio(song);                        // 先抓完整版，抓到再补一条
+        replyMixed(ws, msg, [mediaSeg('record', mp3)]);
+      } catch (e) {
+        console.log('[on] 完整版取不到:', errText(e));
+      }
     }
   }
 
-  function handleAnswer(ws, msg, arg) {
+  async function handleAnswer(ws, msg, arg) {
     const guess = String(arg || '').trim();
     const r = roundOf(msg);
     if (!r) return replyText(ws, msg, '现在没有进行中的游戏。发 /on猜卡、/on猜曲 或 /on猜语音 开一局。');
-    if (!guess) return replyText(ws, msg, '用法：/on回答 <你猜的名字>');
+    if (!guess) return replyText(ws, msg, '用法：/回答 <你猜的名字>（/答、/猜 同义）');
     const hit = guessHit(guess, r.answer.accept);
     if (hit) {
       dropRound(gameKey(msg));
-      replyText(ws, msg, `答对了！${hit.how ? hit.how + '，' : ''}答案是「${r.answer.label}」` +
+      return revealRound(ws, msg, r, `答对了！${hit.how ? hit.how + '，' : ''}` +
         (r.tries ? `（第 ${r.tries + 1} 次猜中）` : ''));
-      if (r.type === 'card' && r.answer.card) {
-        const f = fullArtOf(r.answer.card);
-        if (f) replyImage(ws, msg, f);
-      }
-      return;
     }
     r.tries++;
     if (r.tries >= GAME_GIVEUP_AT) {
@@ -1706,11 +1750,11 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     return replyText(ws, msg, '不对，再想想～' + (r.hint && r.tries > GAME_HINT_AT ? '　' + r.hint : ''));
   }
 
-  function handleEnd(ws, msg) {
+  async function handleEnd(ws, msg) {
     const r = roundOf(msg);
     if (!r) return replyText(ws, msg, '现在没有进行中的游戏。');
     dropRound(gameKey(msg));
-    revealRound(ws, msg, r, '这局结束了，');
+    return revealRound(ws, msg, r, '这局结束了，');
   }
 
   // ---------------- 匹配注册
@@ -1718,8 +1762,8 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     { re: /^\s*\/on(?:guesscard|猜卡|gcard)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleGuessCard(ws, msg, m[1] || ''), shortOnly: true },
     { re: /^\s*\/on(?:guesssong|猜曲|gsong)\s*([\s\S]*)$/i, run: (ws, msg) => handleGuessSong(ws, msg), shortOnly: true },
     { re: /^\s*\/on(?:guessvoice|猜语音|gvoice)\s*([\s\S]*)$/i, run: (ws, msg) => handleGuessVoice(ws, msg), shortOnly: true },
-    { re: /^\s*\/on(?:answer|回答|答)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleAnswer(ws, msg, m[1] || ''), shortOnly: true },
-    { re: /^\s*\/on(?:end|结束|放弃)\s*([\s\S]*)$/i, run: (ws, msg) => handleEnd(ws, msg), shortOnly: true },
+    { re: /^\s*\/(?:回答|答|猜)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleAnswer(ws, msg, m[1] || ''), shortOnly: true },
+    { re: /^\s*\/(?:结束|放弃)\s*([\s\S]*)$/i, run: (ws, msg) => handleEnd(ws, msg), shortOnly: true },
     { re: /^\s*\/on(?:charalias|角色别名)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleCharAlias(ws, msg, m[1] || '') },
     { re: /^\s*\/on(?:card|查卡)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleCard(ws, msg, m[1] || '') },
     { re: /^\s*\/on(?:voice|语音|听)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleVoice(ws, msg, m[1] || '') },
@@ -1753,7 +1797,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     });
   }
 
-  console.log('Our Notes 指令已注册: /on查卡 /oncard /on查曲 /on听曲 /on听 /on谱面预览 /on查谱面 /on小漫画 /on卡池 /on贴纸 /on难度排行 /on效益排行 /on效率排行 /on猜卡 /on猜曲 /on猜语音 /on回答 /on结束 /on添加别名 /on角色别名 /on待审核 /on通过 /on阻止 /on更新 /onhelp'
+  console.log('Our Notes 指令已注册: /on查卡 /oncard /on查曲 /on听曲 /on听 /on谱面预览 /on查谱面 /on小漫画 /on卡池 /on贴纸 /on难度排行 /on效益排行 /on效率排行 /on猜卡 /on猜曲 /on猜语音 /回答 /结束 /on添加别名 /on角色别名 /on待审核 /on通过 /on阻止 /on更新 /onhelp'
     + `（角色 ${INDEX ? INDEX.characters.length : 0} / 卡片 ${INDEX ? INDEX.cards.length : 0} / 曲目 ${SONGS ? SONGS.songs.length : 0}`
     + `，别名 ${Object.keys(ALIASES).length} 条，CRI密钥 ${process.env.ON_CRI_KEY ? '已配置' : '未配置'}）`);
 }
