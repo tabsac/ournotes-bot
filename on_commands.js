@@ -576,6 +576,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     '/回答 <答案>                  回答当前这一局（/答、/猜 同义）',
     '/结束                         放弃这一局并公布答案',
     '　猜答案不用一字不差，写别名或很接近的写法都算对。',
+    '　一局 1 分钟（谜面发完开始计时，到点自动公布答案）；一个会话同时只能开一局。',
     '',
     '【其它】',
     '/on添加别名 <原名> <别名>      给曲子登记别名',
@@ -645,15 +646,18 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
       '用法 /on猜卡 [大|中|小]',
       '随机抽一张非 R 卡，只发卡面里极小的一块（默认 160px，约卡面的十分之一），猜这是哪个角色。',
       '　大 = 240px 好认一点　中 = 160px（默认）　小 = 100px 更难',
-      '答：/回答 <角色名>（/答、/猜 同义；别名、日文名、写得很接近都算对）；放弃就 /结束。'],
+      '答：/回答 <角色名>（/答、/猜 同义；别名、日文名、写得很接近都算对）；放弃就 /结束。',
+      '时限 1 分钟（谜面发完开始计时），一个会话同时只能有一局。'],
     '猜曲': ['/on猜曲（/onguesssong）',
       '用法 /on猜曲',
       '随机抽一首曲子，发其中 3 秒音频，猜曲名。',
-      '答：/回答 <曲名>（别名与相近写法都算对）；放弃就 /结束。'],
+      '只发 3 秒音频、不带文字；答：/回答 <曲名>（别名与相近写法都算对）；放弃就 /结束。',
+      '时限 1 分钟（谜面发完开始计时），一个会话同时只能有一局。'],
     '猜语音': ['/on猜语音（/onguessvoice）',
       '用法 /on猜语音',
       '随机抽一条角色语音，发其中 3 秒，猜是哪个角色。',
-      '答：/回答 <角色名>；放弃就 /结束。'],
+      '答：/回答 <角色名>；放弃就 /结束。',
+      '时限 1 分钟（谜面发完开始计时），一个会话同时只能有一局。'],
     '回答': ['/回答（/答、/猜 同义）',
       '用法 /回答 <答案>',
       '回答 /on猜卡、/on猜曲、/on猜语音 开的那一局，答错可以继续答，3 次后会提示，6 次未果自动公布答案。',
@@ -1454,7 +1458,8 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
   // 一局一题，按会话（群 / 私聊）存；答对或 /结束 收局。答案用「模糊匹配 + 别名」判定。
   // 谜面与文字同一条发出；收局给完整语音 / 原文 / 曲绘 / 完整卡面。
   const GAMES = new Map();                     // 'g:<群号>' / 'p:<QQ>' -> 当前这一局
-  const GAME_TTL_MS = 30 * 60 * 1000;          // 半小时没动静就作废
+  const GAME_TTL_MS = 30 * 60 * 1000;          // 兜底：半小时没动静就作废（正常有一分钟时限）
+  const GAME_MS = 60 * 1000;                   // 一局时限：谜面（全部素材）发完开始计时 1 分钟
   const GAME_KIND = { card: '猜卡', song: '猜曲', voice: '猜语音' };
   const GAME_HINT_AT = 3;                      // 答错几次给提示
   const GAME_GIVEUP_AT = 6;                    // 答错几次自动公布答案
@@ -1506,7 +1511,9 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
   function dropRound(key) {
     const r = GAMES.get(key);
     GAMES.delete(key);
-    if (r && r.file) { try { fs.unlinkSync(r.file); } catch (e) {} }
+    if (!r) return;
+    if (r.timer) { try { clearTimeout(r.timer); } catch (e) {} }
+    if (r.file) { try { fs.unlinkSync(r.file); } catch (e) {} }
   }
 
   /** 谜面文件都在 /tmp/guess_*：开局时顺手清掉 6 小时前的（收局会删，没答的靠这个兜底） */
@@ -1551,16 +1558,26 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     return { start, dur, secs };
   }
 
+  /** 谜面下面的提示文字（猜曲不带文字，只发音频） */
   const guessPrompt = (r) => {
-    const head = r.type === 'song' ? '听 3 秒，这是哪首歌？'
-      : r.type === 'voice' ? '听 3 秒，这是哪个角色？'
-        : '这是哪张卡的角色？';
+    const head = r.type === 'voice' ? '听 3 秒，这是哪个角色？' : '这是哪张卡的角色？';
     return `${GAME_KIND[r.type]}：${head}\n发 /回答 <答案>（/答、/猜 同义），放弃发 /结束`;
   };
 
+  /** 这个会话已经有进行中的一局？有就提示并返回它（三个猜不能同时进行） */
+  function busyRound(ws, msg) {
+    const r = roundOf(msg);
+    if (!r) return null;
+    const left = Math.max(1, Math.round(((r.deadline || (r.at + GAME_MS)) - Date.now()) / 1000));
+    replyText(ws, msg, `正在进行游戏：这一局是「${GAME_KIND[r.type]}」，还剩约 ${left} 秒。`
+      + '这一局不受影响，答对或发 /结束 之后再开新的一局。');
+    return r;
+  }
+
   const mediaSeg = (type, f) => ({ type: type, data: { file: 'file://' + f } });
 
-  /** 开一局：记状态 → 谜面与文字**同一条**发出 */
+  /** 开一局：记状态 → 谜面与文字同一条发出 → 素材发完才开始算 1 分钟
+   *  （猜曲只发音频，不带文字） */
   function openRound(ws, msg, r, file, seg) {
     dropRound(gameKey(msg));
     sweepGuessTmp();
@@ -1572,13 +1589,21 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     const t = target(msg);
     const segs = [];
     if (seg) segs.push(seg);
-    segs.push({ type: 'text', data: { text: guessPrompt(r) } });
+    if (r.type !== 'song') segs.push({ type: 'text', data: { text: guessPrompt(r) } });
     sendReply(ws, t.action, Object.assign({}, t.base, { message: segs }));
+    // 全部资源发出去之后开始计时
+    r.deadline = Date.now() + GAME_MS;
+    r.timer = setTimeout(() => {
+      if (GAMES.get(gameKey(msg)) !== r) return;
+      dropRound(gameKey(msg));
+      revealRound(ws, msg, r, '时间到（1 分钟），');
+    }, GAME_MS);
   }
 
   /** 猜卡：随机一张非 R 卡，剪卡面极小一块当谜面 */
   async function handleGuessCard(ws, msg, arg) {
     if (!INDEX) return replyText(ws, msg, '卡片数据缺失（先让管理员跑 /on更新 主数据）');
+    if (busyRound(ws, msg)) return;
     const key = String(arg || '').trim();
     let size = CARD_CROP['中'];
     if (key) {
@@ -1606,6 +1631,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
    *  （完整版只当剪片段的素材，收局不发它） */
   async function handleGuessSong(ws, msg) {
     if (!SONGS || !SONGS.songs.length) return replyText(ws, msg, '曲目数据缺失（先让管理员跑 /on更新 主数据）');
+    if (busyRound(ws, msg)) return;
     const all = SONGS.songs.filter((s) => s.acbBundle);
     let lastErr = null;
     for (let i = 0; i < 3; i++) {
@@ -1629,6 +1655,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
   async function handleGuessVoice(ws, msg) {
     const all = voices();
     if (!all.length) return replyText(ws, msg, '语音数据缺失（先让管理员跑 /on更新 主数据）');
+    if (busyRound(ws, msg)) return;
     const usable = [];
     for (const v of all) {
       const info = soundMap().get(v.soundId) || {};
