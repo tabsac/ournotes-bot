@@ -577,6 +577,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     '/结束                         放弃这一局并公布答案',
     '　猜答案不用一字不差，写别名或很接近的写法都算对。',
     '　一局 1 分钟（谜面发完开始计时，到点自动公布答案）；一个会话同时只能开一局。',
+    '　猜错会告诉你「猜错了，不是X」，名字写偏了会给「你要猜的是不是：…(80%)」这样的候选。',
     '',
     '【其它】',
     '/on添加别名 <原名> <别名>      给曲子登记别名',
@@ -1501,6 +1502,75 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     return null;
   }
 
+  /** 相似度 0~1（子串 / 编辑距离 / 字符重合度 + 最长公共子串，取几种里最大的） */
+  function simScore(a, b) {
+    if (!a || !b) return 0;
+    if (a === b) return 1;
+    let sc = 0;
+    if (a.includes(b) || b.includes(a)) {
+      sc = 0.9 + 0.09 * Math.min(a.length, b.length) / Math.max(a.length, b.length);
+    } else {
+      sc = 0.6 * lcsRatio(a, b) + 0.4 * lcSubstr(a, b) / Math.max(a.length, b.length);
+      if (a.slice(0, 2) === b.slice(0, 2)) sc += 0.12;
+    }
+    const d = editDistance(a, b);
+    sc = Math.max(sc, 1 - d / Math.max(a.length, b.length));
+    return Math.min(0.99, sc);
+  }
+
+  /** 这一局「算数的答案」全集：猜卡/猜语音 = 角色，猜曲 = 曲子（用于猜错时的提示） */
+  const ENTITY_CACHE = {};
+  function entityList(type) {
+    if (ENTITY_CACHE[type]) return ENTITY_CACHE[type];
+    let list = [];
+    try {
+      if (type === 'song') {
+        list = ((SONGS && SONGS.songs) || []).map((sg) => ({ id: sg.id,
+          name: sg.title || sg.title_jp || String(sg.id), names: songNames(sg) }));
+      } else if (INDEX) {
+        list = INDEX.characters.map((ch) => ({ id: ch.id, name: ch.name, names: charNames(ch) }));
+      }
+    } catch (e) { console.error('[on] 猜题全集构建失败:', errText(e)); }
+    ENTITY_CACHE[type] = list;
+    return list;
+  }
+
+  /** 用户答的到底是哪个角色 / 哪首曲子（先精确，再模糊）；都不是返回 null */
+  function findEntity(guess, list) {
+    const s = norm(guess);
+    if (!s) return null;
+    for (const e of list) {
+      for (const n of e.names) if (norm(n) === s) return e;
+    }
+    for (const e of list) if (guessHit(guess, e.names)) return e;
+    return null;
+  }
+
+  /** 猜错的三种回复：① 是别的角色/曲子 → 「猜错了，不是X」
+   *  ② 不认得、但有相近的 → 「你要猜的是不是：A(80%)，B(70%)，C(60%)」
+   *  ③ 完全找不到 → 「没有找到你回答的人物/歌曲：X」 */
+  function wrongReply(r, guess) {
+    const list = entityList(r.type);
+    const hit = findEntity(guess, list);
+    if (hit) return `猜错了，不是${hit.name}`;
+    const s = norm(guess);
+    const scored = [];
+    for (const e of list) {
+      let best = 0;
+      for (const n of e.names) {
+        const v = simScore(s, norm(n));
+        if (v > best) best = v;
+      }
+      if (best >= 0.3) scored.push({ e, score: best });
+    }
+    scored.sort((a, b) => b.score - a.score || String(a.e.id).localeCompare(String(b.e.id)));
+    if (scored.length) {
+      return '你要猜的是不是：' + scored.slice(0, 3)
+        .map((x) => `${x.e.name}(${Math.round(x.score * 100)}%)`).join('，');
+    }
+    return (r.type === 'song' ? '没有找到你回答的歌曲：' : '没有找到你回答的人物：') + guess;
+  }
+
   function roundOf(msg) {
     const k = gameKey(msg);
     const r = GAMES.get(k);
@@ -1791,10 +1861,9 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
       dropRound(gameKey(msg));
       return revealRound(ws, msg, r, `猜了 ${r.tries} 次都没对，`);
     }
-    if (r.tries === GAME_HINT_AT && r.hint) {
-      return replyText(ws, msg, `还不对。${r.hint}`);
-    }
-    return replyText(ws, msg, '不对，再想想～' + (r.hint && r.tries > GAME_HINT_AT ? '　' + r.hint : ''));
+    let notRight = wrongReply(r, guess);
+    if (r.hint && r.tries >= GAME_HINT_AT) notRight += `\n${r.hint}`;
+    return replyText(ws, msg, notRight);
   }
 
   async function handleEnd(ws, msg) {
