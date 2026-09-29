@@ -661,7 +661,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
       '时限 1 分钟（谜面发完开始计时），一个会话同时只能有一局。'],
     '回答': ['/回答（/答、/猜 同义）',
       '用法 /回答 <答案>',
-      '回答 /on猜卡、/on猜曲、/on猜语音 开的那一局，答错可以继续答，3 次后会提示，6 次未果自动公布答案。',
+      '回答 /on猜卡、/on猜曲、/on猜语音 开的那一局，答错可以继续答（最多 6 次，之后自动公布答案）。',
       '答对会记一次战绩（按 QQ），并回一句「你答对过 N 次」。'],
     '结束': ['/结束（/放弃 同义）',
       '用法 /结束',
@@ -1463,8 +1463,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
   const GAME_TTL_MS = 30 * 60 * 1000;          // 兜底：半小时没动静就作废（正常有一分钟时限）
   const GAME_MS = 60 * 1000;                   // 一局时限：谜面（全部素材）发完开始计时 1 分钟
   const GAME_KIND = { card: '猜卡', song: '猜曲', voice: '猜语音' };
-  const GAME_HINT_AT = 3;                      // 答错几次给提示
-  const GAME_GIVEUP_AT = 6;                    // 答错几次自动公布答案
+  const GAME_GIVEUP_AT = 6;                    // 答错几次自动公布答案（中途不再提示）
   const CARD_CROP = { 大: 240, 中: 160, 小: 100, 简单: 240, 普通: 160, 困难: 100, 难: 100, 易: 240 };
   const CLIP_SECONDS = 3;
 
@@ -1710,7 +1709,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
       try {
         await runPy(['guessimg.py', '--id', String(c.id), '--size', String(size), '--out', out], out);
         const r = { type: 'card', answer: { label: ch.name, accept: charNames(ch), char: ch.id, card: c.id },
-          hint: `提示：这个角色属于 ${ch.band || '？'}` };
+          };
         return openRound(ws, msg, r, out, mediaSeg('image', out));
       } catch (e) { /* 这张没有完整卡面，换一张 */ }
     }
@@ -1731,7 +1730,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
         const mp3 = await ensureAudio(song);          // 直接抓完整版
         await clipAudio(mp3, out);
         const r = { type: 'song', answer: { label: songLabel(song), accept: songNames(song), song: song.id },
-          hint: `提示：这首歌来自 ${bandNameOf(song)}` };
+          };
         return openRound(ws, msg, r, out, mediaSeg('record', out));
       } catch (e) {
         lastErr = e;
@@ -1764,7 +1763,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
         await clipAudio(mp3, out);
         const r = { type: 'voice', answer: { label: ch.name, accept: charNames(ch), char: ch.id },
           voice: { soundId: pick.v.soundId, textId: pick.v.textId },
-          hint: `提示：这个角色属于 ${ch.band || '？'}` };
+          };
         return openRound(ws, msg, r, out, mediaSeg('record', out));
       } catch (e) {
         lastErr = e;
@@ -1772,19 +1771,6 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
       }
     }
     return replyText(ws, msg, '语音拿不到，稍后再试。' + (lastErr ? '（' + errText(lastErr) + '）' : ''));
-  }
-
-  /** 曲子的团体名（谜面提示用） */
-  function bandNameOf(song) {
-    try {
-      const b = song.band;
-      if (Array.isArray(b) && b.length) return b.map((x) => x.name).join(' / ');
-      if (typeof b === 'string' && b.trim()) {
-        const m = /'name':\s*'([^']+)'/.exec(b);
-        if (m) return m[1];
-      }
-    } catch (e) {}
-    return '？';
   }
 
   /** 卡面整图（公布答案时一起发） */
@@ -1861,9 +1847,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
       dropRound(gameKey(msg));
       return revealRound(ws, msg, r, `猜了 ${r.tries} 次都没对，`);
     }
-    let notRight = wrongReply(r, guess);
-    if (r.hint && r.tries >= GAME_HINT_AT) notRight += `\n${r.hint}`;
-    return replyText(ws, msg, notRight);
+    return replyText(ws, msg, wrongReply(r, guess));
   }
 
   async function handleEnd(ws, msg) {
@@ -1882,7 +1866,6 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     { re: /^\s*\/(?:结束|放弃)\s*([\s\S]*)$/i, run: (ws, msg) => handleEnd(ws, msg), shortOnly: true },
     { re: /^\s*\/on(?:charalias|角色别名)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleCharAlias(ws, msg, m[1] || '') },
     { re: /^\s*\/on(?:card|查卡)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleCard(ws, msg, m[1] || '') },
-    { re: /^\s*\/on(?:voice|语音|听)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleVoice(ws, msg, m[1] || '') },
     { re: /^\s*\/on(?:comic|小漫画|漫画)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleComic(ws, msg, m[1] || '') },
     { re: /^\s*\/on(?:rank|难度排行|排行)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleRank(ws, msg, m[1] || '') },
     { re: /^\s*\/on(?:benefit|效益排行|效益)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleEff(ws, msg, m[1] || '', 'benefit') },
@@ -1890,7 +1873,9 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     { re: /^\s*\/on(?:stamp|贴纸)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleStamp(ws, msg, m[1] || '') },
     { re: /^\s*\/on(?:gacha|卡池|招募)\s*([\s\S]*)$/i, run: (ws, msg) => handleGacha(ws, msg) },
     { re: /^\s*\/on(?:song|曲|查曲)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleSong(ws, msg, m[1] || '') },
+    // 「听曲 / 听歌」必须排在「听」前面：/on听 的正则原先把 /on听歌 的「歌」当成参数吞掉（踩过）
     { re: /^\s*\/on(?:listen|听曲|听歌)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleListen(ws, msg, m[1] || '') },
+    { re: /^\s*\/on(?:voice|语音|听(?!曲|歌))\s*([\s\S]*)$/i, run: (ws, msg, m) => handleVoice(ws, msg, m[1] || '') },
     { re: /^\s*\/on(?:chart|chartinfo|谱面预览|谱面数据|谱面|查谱面)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleChart(ws, msg, m[1] || '') },
     { re: /^\s*\/on(?:alias|别名|添加别名)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleAlias(ws, msg, m[1] || '') },
     { re: /^\s*\/(?:review|待审核)\s*([\s\S]*)$/i, run: (ws, msg) => handlePending(ws, msg) },
