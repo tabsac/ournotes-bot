@@ -45,6 +45,7 @@ tools/
   cri_url.py            catalog → CRI 音频包 URL 映射（角色语音用）
   acb_cues.py           ACB → 按 cue 名取出音轨并解码（角色语音用）
   verify_voicepacks.js  角色语音音频包全量校验（两条打包路线各取一次）
+  export_asset.js       按资源名从 bundle 里导出图片（卡池封面等）
   audio_selftest.js     全曲音频自检（走与指令相同的代码路径）
   grpc_probe.js         gRPC 免登录方法面探测
 data/on/
@@ -54,7 +55,8 @@ data/on/
   stampimg.py           贴纸图鉴
   rankimg.py            难度排行图
   effimg.py             效益 / 效率排行图
-  gachainfo.py          当期卡池
+  gachainfo.py          当期卡池数据与文本一览
+  gachaimg.py           当期卡池一览图（封面 + 期间 + 概率 + Pick Up）
   unitysrc/             UnityFS / 序列化文件 / 贴图解析（含 lz4hc、ASTC 解码）
 tests/                  假 NapCat 客户端，用来触发指令（需要有一个跑起来的宿主）
 ```

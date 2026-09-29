@@ -12,7 +12,7 @@
  *    /on谱面预览 <曲名> [难度]   谱面长图（/on查谱面 是同一条；难度 ex/hd/nor/ez，默认 ex）
  *  图鉴
  *    /on小漫画 [角色]           随机一张加载漫画
- *    /on卡池                    当期招募
+ *    /on卡池                    当期招募一览图（封面 + 期间 + 概率 + Pick Up）
  *    /on贴纸 [角色]             贴纸图鉴
  *    /on难度排行 [难度] [整数]   难度排行图
  *    /on效益排行 [难度] [整数]   效益排行（单局理论最高分）
@@ -523,7 +523,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     '',
     '【图鉴・排行】',
     '/on小漫画 [角色]              随机一张加载漫画（不给角色就随机）',
-    '/on卡池                       当期招募：卡池・概率・Pick Up',
+    '/on卡池                       当期招募一览图（封面・概率・Pick Up）',
     '/on贴纸 [角色]                贴纸图，不给角色就发全部',
     '/on难度排行 [难度] [整数]      难度排行图',
     '　例 /on难度排行 25（EXPERT 25.0~25.9）　/on难度排行 ex 25　/on难度排行 hd',
@@ -568,7 +568,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
       '例 /on小漫画　/on小漫画 灯'],
     '卡池': ['/on卡池（/ongacha、/on招募）',
       '用法 /on卡池',
-      '当前正在开的招募：卡池名与时间、Pick Up 卡片、各星级概率。'],
+      '当前正在开的招募，画成一张图：卡池封面、活动期间、各星级概率、Pick Up 卡片。'],
     '贴纸': ['/on贴纸（/onstamp）',
       '用法 /on贴纸 [角色]',
       '该角色的贴纸图鉴；不给角色就发全部角色的。',
@@ -1094,11 +1094,20 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
 
   // ---------------- 卡池
   async function handleGacha(ws, msg) {
+    // 卡池预览 = 构造图片（封面横幅 + 期间 + 概率 + Pick Up 卡缩略图）；没有在开的卡池时退回文本
+    const out = path.join(CACHE_DIR, 'gacha.png');
     try {
-      return replyText(ws, msg, await runPyOut(['gachainfo.py']));
+      try { fs.unlinkSync(out); } catch (e) {}     // 免得脚本没出图时用到上一次的旧图
+      await runPy(['gachaimg.py', '--out', out], out);
+      return replyImage(ws, msg, out);
     } catch (e) {
-      console.error('[on] 卡池失败:', errText(e));
-      return replyText(ws, msg, '卡池读取失败：' + errText(e));
+      console.log('[on] 卡池改为文本输出:', errText(e));
+      try {
+        return replyText(ws, msg, await runPyOut(['gachainfo.py']));
+      } catch (e2) {
+        console.error('[on] 卡池失败:', errText(e2));
+        return replyText(ws, msg, '卡池读取失败：' + errText(e2));
+      }
     }
   }
 
