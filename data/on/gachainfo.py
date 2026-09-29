@@ -52,7 +52,10 @@ def collect(now=None):
         st, en = parse_dt(g.get('_startAt')), parse_dt(g.get('_endAt'))
         if st and st > now:
             continue
-        if en is None or en >= now:
+        # 只有「限定期间」的招募参与展示：没有结束时间（常驻 / 券池）的不进列表
+        if en is None:
+            continue
+        if en >= now:
             alive.append(g)
 
     def card_of(cid):

@@ -1,7 +1,7 @@
 # Our Notes 指令模块（BanG Dream! Our Notes）
 
 `on_commands.js`：手游 **BanG Dream! Our Notes** 的 QQ 机器人指令模块（OneBot v11）——
-查卡、查曲、听曲（含完整版）、角色语音、谱面预览与难度排行、卡池、贴纸、小漫画、效益 / 效率排行……
+查卡、查曲、听曲（含完整版）、角色语音、谱面预览与难度排行、卡池、贴纸、小漫画、猜卡 / 猜曲 / 猜语音 小游戏、效益 / 效率排行……
 
 > 非官方粉丝项目。游戏素材与数据版权归 **Bushiroad / Craft Egg / Ishimori** 所有。
 > 本仓库只包含**指令模块与配套工具**，不含任何游戏素材、主数据或解密密钥。
@@ -14,7 +14,7 @@
 const register = require('./on_commands.js');
 
 register({
-  commands,            // 数组；每条 { ignoreAt, match(plainText, msg), execute(ws, msg, params) }
+  commands,            // 数组；每条 { ignoreAt, shortOnly, match(plainText, msg), execute(ws, msg, params) }
                        // 宿主逐条试 match，命中就 execute —— 匹配不过就返回 false
   sendReply,           // (ws, action, params) => void，把 action 发给 QQ
   imageCqFromPath,     // (file) => '[CQ:image,file=…]'
@@ -23,11 +23,13 @@ register({
 ```
 
 模块约定：`ignoreAt: true` 的指令不需要 @ 机器人也能触发；其余按宿主的 @ 规则走。
+`shortOnly: true`（小游戏来回互动的那几条）是给宿主的可选提示：只受短冷却约束、不累计长冷却，
+宿主不支持时忽略即可，指令照常工作。
 
 ## 仓库内容
 
 ```
-on_commands.js          /on* 指令实现（查卡 / 查曲 / 听曲 / 角色语音 / 谱面 / 排行 / 卡池 / 贴纸 / 小漫画 …）
+on_commands.js          /on* 指令实现（查卡 / 查曲 / 听曲 / 角色语音 / 谱面 / 排行 / 卡池 / 贴纸 / 小漫画 / 猜卡猜曲猜语音 …）
 lib/secrets.js|.py      密钥读取（环境变量 → secrets.json）
 tools/
   on_update.js          资源包增量更新（catalog hash → bundle diff → 下载解密）
@@ -55,8 +57,9 @@ data/on/
   stampimg.py           贴纸图鉴
   rankimg.py            难度排行图
   effimg.py             效益 / 效率排行图
-  gachainfo.py          当期卡池数据与文本一览
+  gachainfo.py          当期卡池数据与文本一览（只算限定期间的）
   gachaimg.py           当期卡池一览图（封面 + 期间 + 概率 + Pick Up）
+  guessimg.py           猜卡用的卡面局部切片（随机剪一小块并放大）
   unitysrc/             UnityFS / 序列化文件 / 贴图解析（含 lz4hc、ASTC 解码）
 tests/                  假 NapCat 客户端，用来触发指令（需要有一个跑起来的宿主）
 ```

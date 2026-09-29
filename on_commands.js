@@ -18,11 +18,16 @@
  *    /on效益排行 [难度] [整数]   效益排行（单局理论最高分）
  *    /on效率排行 [难度] [整数]   效率排行（效益 ÷ 时长）
  *  别名
- *    /on添加别名 <原名> <别名>   登记别名（谁都能用；加完立即可用并进待审核队列）
+ *    /on添加别名 <原名> <别名>   曲子别名（谁都能加，进待审核队列）
+ *    /on角色别名 <角色> <别名>   角色别名（同上；查卡/听/小漫画/猜卡/猜语音都认）
+ *  小游戏
+ *    /on猜卡 [大|中|小]          卡面剪一小块，猜角色（R 卡不参与）
+ *    /on猜曲 /on猜语音           听 3 秒，猜曲名 / 猜角色
+ *    /on回答 <答案> /on结束       答题 / 放弃（模糊匹配 + 别名都算对）
  *  管理（不进 help）
- *    /待审核                    列出待审核队列
+ *    /待审核                    列出待审核队列（曲子别名 + 角色别名）
  *    /通过 <标号…|全部>          通过
- *    /阻止 <标号…>              阻止：撤销该别名，并按「类型+曲目+别名」拉黑
+ *    /阻止 <标号…>              阻止：撤销该别名，并按「类型+对象+别名」拉黑
  *    /on更新 [资源|主数据] [应用|状态]  资源/主数据增量更新
  *  其它
  *    /onhelp [指令]             帮助（文本见 HELP_MAIN / HELP_DETAIL）
@@ -39,6 +44,7 @@ const CACHE_DIR = path.join(ON_DIR, 'cache');
 const CHART_DIR = path.join(ON_DIR, 'chart');
 const AUDIO_DIR = path.join(ON_DIR, 'audio');
 const ALIAS_FILE = path.join(ON_DIR, 'aliases.json');
+const CHAR_ALIAS_FILE = path.join(ON_DIR, 'char_aliases.json');   // 角色别名（/on角色别名）
 const ADMIN = String(process.env.ON_ADMIN || require(path.join(__dirname, 'lib', 'secrets.js')).get('admin') || '');
 const RENDER_TIMEOUT_MS = 90 * 1000;
 const withBundle = (n) => (String(n || '').endsWith('.bundle') ? String(n) : String(n || '') + '.bundle');
@@ -83,15 +89,19 @@ const COLOR_WORDS = { 1: ['红', '红色'], 2: ['蓝', '蓝色'], 3: ['绿', '�
 const DIFFS = ['EASY', 'NORMAL', 'HARD', 'EXPERT'];
 
 let INDEX = null, SONGS = null, ALIASES = {};
+let CHAR_ALIASES = {};                     // 角色 id → [别名]
 const readJson = (p, d) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { return d; } };
 INDEX = readJson(path.join(ON_DIR, 'index.json'), null);
 SONGS = readJson(path.join(ON_DIR, 'songs.json'), null);
 ALIASES = readJson(ALIAS_FILE, {});
+CHAR_ALIASES = readJson(CHAR_ALIAS_FILE, {}) || {};
 // 别名审核队列：加别名立即可用并进 pending；被 /on阻止 的进 blocked
 // （黑名单按 类型 + 曲目 + 别名 记，别的曲子还能用同一个别名）
 const REVIEW_FILE = path.join(ON_DIR, 'alias_review.json');
-const REVIEW_TYPE = 'on别名';            // 目前只有这一种类型
+const REVIEW_TYPE = 'on别名';            // 曲子别名
+const REVIEW_TYPE_CHAR = 'on角色别名';   // 角色别名
 const REVIEW_TYPE_LABEL = '别名(on)';    // 队列里显示的样子
+const typeLabel = (t) => (t === REVIEW_TYPE_CHAR ? '别名(角色)' : REVIEW_TYPE_LABEL);
 const REVIEW = readJson(REVIEW_FILE, null) || {};
 REVIEW.pending = Array.isArray(REVIEW.pending) ? REVIEW.pending : [];
 REVIEW.blocked = Array.isArray(REVIEW.blocked) ? REVIEW.blocked : [];
@@ -103,6 +113,27 @@ function saveReview() {
 function saveAliases() {
   try { fs.writeFileSync(ALIAS_FILE, JSON.stringify(ALIASES, null, 1)); return true; }
   catch (e) { console.error('[on] 别名写入失败:', e.message); return false; }
+}
+
+function saveCharAliases() {
+  try { fs.writeFileSync(CHAR_ALIAS_FILE, JSON.stringify(CHAR_ALIASES, null, 1)); return true; }
+  catch (e) { console.error('[on] 角色别名写入失败:', e.message); return false; }
+}
+
+/** 角色的所有可认名字：index.json 里的 aliases + /on角色别名 登记的。
+ *  纯数字的别名（index 里有 "1" 这种）不参与，免得猜卡直接打「1」就中。 */
+function charNames(ch) {
+  const out = [];
+  const push = (a) => {
+    const s = String(a == null ? '' : a).trim();
+    if (s && !/^\d+$/.test(s) && out.indexOf(s) < 0) out.push(s);
+  };
+  if (ch) {
+    for (const a of ch.aliases || []) push(a);
+    push(ch.name);
+    for (const a of CHAR_ALIASES[String(ch.id)] || []) push(a);
+  }
+  return out;
 }
 
 const norm = (s) => String(s || '')
@@ -180,7 +211,7 @@ function resolveCharacter(q) {
   if (!s) return null;
   let best = null;
   for (const ch of INDEX.characters) {
-    for (const a of ch.aliases) {
+    for (const a of charNames(ch)) {
       const an = norm(a);
       if (an === s) return ch;
       if (an.includes(s) || s.includes(an)) {
@@ -455,11 +486,12 @@ const { acbFromBundle, fullBundleFor } = require(path.join(__dirname, 'tools', '
  *   2. 完整版包里的 ACB 是分片 + 单字节异或的，见 acbFromBundle()。
  *   3. HCA 载荷用「基础密钥 × AFS2 subkey」推出的表替换，块尾 CRC16 覆盖的是密文。
  *      细节与实测见 tools/hca_dec.c。 */
-async function ensureAudio(song) {
+async function ensureAudio(song, opts) {
   try { fs.mkdirSync(AUDIO_DIR, { recursive: true }); } catch (e) {}
   if (!song.acbBundle) throw new Error('这首曲子没有对应的音频包');
 
-  const full = fullBundleFor(song.acbBundle);
+  // opts.short：只要试听包（~28 秒，包小、下得快），猜曲这类只用 3 秒的场合用
+  const full = (opts && opts.short) ? null : fullBundleFor(song.acbBundle);
   const want = full || song.acbBundle;
   const mp3 = path.join(AUDIO_DIR, `${song.id}${full ? '' : '.short'}.mp3`);
   if (fs.existsSync(mp3) && fs.statSync(mp3).size > 4096) return mp3;
@@ -530,8 +562,17 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     '/on效益排行 [难度] [整数]      效益排行（单局理论最高分，针对查曲）',
     '/on效率排行 [难度] [整数]      效率排行（效益 ÷ 时长）',
     '',
+    '【小游戏】',
+    '/on猜卡 [大|中|小]            只看卡面的一小块，猜是哪个角色（R 卡不参与）',
+    '/on猜曲                       听 3 秒音频，猜是哪首歌',
+    '/on猜语音                     听 3 秒语音，猜是哪个角色',
+    '/on回答 <答案>                回答当前这一局',
+    '/on结束                       放弃这一局并公布答案',
+    '　猜答案不用一字不差，写别名或很接近的写法都算对。',
+    '',
     '【其它】',
-    '/on添加别名 <原名> <别名>      给曲子登记别名（加完立即可用）',
+    '/on添加别名 <原名> <别名>      给曲子登记别名',
+    '/on角色别名 <角色> <别名>      给角色登记别名',
     '/onhelp [指令]                这条帮助；带上指令名看单条用法',
     '',
     '曲名记不全也没关系，会按相似度列出最接近的几首。',
@@ -587,8 +628,31 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
       '例 /on效率排行　/on效率排行 ez'],
     '添加别名': ['/on添加别名（/onalias、/on别名）',
       '用法 /on添加别名 <原名> <别名>',
-      '登记之后 /on查曲、/on听曲、/on谱面预览 都能用这个别名（即时生效，同时进入待审核队列）。',
+      '登记之后 /on查曲、/on听曲、/on谱面预览 都能用这个别名，同时进入待审核队列。',
       '例 /on添加别名 迷星叫 mayoiuta'],
+    '角色别名': ['/on角色别名（/oncharalias）',
+      '用法 /on角色别名 <角色> <别名>',
+      '给角色登记别名：之后 /on查卡、/on听、/on小漫画、/on猜卡、/on猜语音 都能用这个名字，同时进入待审核队列。',
+      '例 /on角色别名 高松灯 tomorin　/on角色别名 丰川祥子 祥子'],
+    '猜卡': ['/on猜卡（/onguesscard）',
+      '用法 /on猜卡 [大|中|小]',
+      '随机抽一张非 R 卡，只发卡面里极小的一块（默认 160px，约卡面的十分之一），猜这是哪个角色。',
+      '　大 = 240px 好认一点　中 = 160px（默认）　小 = 100px 更难',
+      '答：/on回答 <角色名>（别名、日文名、写得很接近都算对）；放弃就 /on结束。'],
+    '猜曲': ['/on猜曲（/onguesssong）',
+      '用法 /on猜曲',
+      '随机抽一首曲子，发其中 3 秒音频，猜曲名。',
+      '答：/on回答 <曲名>（别名与相近写法都算对）；放弃就 /on结束。'],
+    '猜语音': ['/on猜语音（/onguessvoice）',
+      '用法 /on猜语音',
+      '随机抽一条角色语音，发其中 3 秒，猜是哪个角色。',
+      '答：/on回答 <角色名>；放弃就 /on结束。'],
+    '回答': ['/on回答（/onanswer）',
+      '用法 /on回答 <答案>',
+      '回答 /on猜卡、/on猜曲、/on猜语音 开的那一局，答错可以继续答，3 次后会提示，6 次未果自动公布答案。'],
+    '结束': ['/on结束（/onend）',
+      '用法 /on结束',
+      '结束当前这一局并公布答案（猜卡会连完整卡面一起发出来）。'],
   };
 
   // /onhelp 的参数 → 上面的键（中英文名与常用简称都认）
@@ -606,6 +670,12 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     'benefit': '效益排行', '效益排行': '效益排行', '效益': '效益排行',
     'eff': '效率排行', 'efficiency': '效率排行', '效率排行': '效率排行', '效率': '效率排行',
     'alias': '添加别名', '别名': '添加别名', '添加别名': '添加别名',
+    'charalias': '角色别名', '角色别名': '角色别名', '别名角色': '角色别名',
+    'guesscard': '猜卡', '猜卡': '猜卡', 'gcard': '猜卡',
+    'guesssong': '猜曲', '猜曲': '猜曲', 'gsong': '猜曲',
+    'guessvoice': '猜语音', '猜语音': '猜语音', 'gvoice': '猜语音',
+    'answer': '回答', '回答': '回答', '答': '回答',
+    'end': '结束', '结束': '结束', '放弃': '结束',
     'help': '帮助', '帮助': '帮助', '说明': '帮助',
   };
 
@@ -1138,21 +1208,28 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
 
   /** 队列文本：标号就是位置，删掉前面的条目后后面自动前移 */
   function pendingText() {
-    const rows = REVIEW.pending.map((p, i) => {
-      const song = SONGS && SONGS.songs.find((s) => s.id === p.song);
-      const nm = (song && (song.title || song.title_jp)) || p.name || String(p.song);
-      return `${i + 1}. ${nm}${REVIEW_TYPE_LABEL}：${p.alias}`;
-    });
+    const rows = REVIEW.pending.map((p, i) => `${i + 1}. ${itemName(p)}${typeLabel(p.type)}：${p.alias}`);
     if (!rows.length) return '待审核：没有待审核的条目。';
     return [`待审核（${rows.length} 条）`].concat(rows)
       .concat(['/on通过 <标号…>　/on阻止 <标号…>　/on通过 全部']).join('\n');
   }
 
-  const fmtItem = (it) => `${it.name || it.song}${REVIEW_TYPE_LABEL}：${it.alias}`;
+  /** 队列条目的对象名（曲子 / 角色） */
+  function itemName(it) {
+    if ((it.type || REVIEW_TYPE) === REVIEW_TYPE_CHAR) {
+      const ch = INDEX && INDEX.characters.find((c) => c.id === it.char);
+      return (ch && ch.name) || it.name || String(it.char);
+    }
+    const song = SONGS && SONGS.songs.find((s) => s.id === it.song);
+    return (song && (song.title || song.title_jp)) || it.name || String(it.song);
+  }
 
-  /** 黑名单只在「同一类型 + 同一首歌 + 同一个别名」时生效 */
-  const isBlocked = (songId, alias) => REVIEW.blocked.some((b) => b.type === REVIEW_TYPE
-    && String(b.song) === String(songId) && norm(b.alias) === norm(alias));
+  const fmtItem = (it) => `${itemName(it)}${typeLabel(it.type)}：${it.alias}`;
+
+  /** 黑名单只在「同一类型 + 同一个对象 + 同一个别名」时生效 */
+  const isBlocked = (type, id, alias) => REVIEW.blocked.some((b) => (b.type || REVIEW_TYPE) === type
+    && String((b.type || REVIEW_TYPE) === REVIEW_TYPE_CHAR ? b.char : b.song) === String(id)
+    && norm(b.alias) === norm(alias));
 
   function handleAlias(ws, msg, arg) {
     const raw = String(arg || '').trim();
@@ -1169,7 +1246,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     if (list.some((x) => norm(x) === norm(alias))) {
       return replyText(ws, msg, `「${alias}」已经是 ${songLabel(song)} 的别名了。`);
     }
-    if (isBlocked(song.id, alias)) {
+    if (isBlocked(REVIEW_TYPE, song.id, alias)) {
       return replyText(ws, msg, `「${alias}」被管理员阻止过，不能再给「${songLabel(song)}」当别名。`);
     }
     list.push(alias);
@@ -1179,7 +1256,39 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
       alias, by: (msg.sender && msg.sender.user_id) || '', at: new Date().toISOString(),
     });
     saveReview();
-    replyText(ws, msg, `已为「${songLabel(song)}」添加别名：${alias}（已生效，同时进入待审核队列）\n现有别名：${list.join('、')}`);
+    replyText(ws, msg, `已为「${songLabel(song)}」添加别名：${alias}\n现有别名：${list.join('、')}`);
+  }
+
+  /** /on角色别名 <角色> <别名>：和曲子别名一样，登记后立刻能用，同时进审核队列 */
+  function handleCharAlias(ws, msg, arg) {
+    const raw = String(arg || '').trim();
+    const parts = raw.split(/[\s　]+/).filter(Boolean);
+    if (parts.length < 2) {
+      return replyText(ws, msg, '用法：/on角色别名 <角色> <别名>　例：/on角色别名 高松灯 tomorin');
+    }
+    const alias = parts.pop();
+    const name = parts.join(' ');
+    const ch = resolveCharacter(name);
+    if (!ch) {
+      const names = INDEX ? INDEX.characters.map((c) => c.name).join('、') : '';
+      return replyText(ws, msg, `没找到角色「${name}」。可用角色：${names}`);
+    }
+    const key = String(ch.id);
+    const list = CHAR_ALIASES[key] || (CHAR_ALIASES[key] = []);
+    if (charNames(ch).some((x) => norm(x) === norm(alias))) {
+      return replyText(ws, msg, `「${alias}」已经是 ${ch.name} 的名字了。`);
+    }
+    if (isBlocked(REVIEW_TYPE_CHAR, ch.id, alias)) {
+      return replyText(ws, msg, `「${alias}」被管理员阻止过，不能再给「${ch.name}」当别名。`);
+    }
+    list.push(alias);
+    if (!saveCharAliases()) return replyText(ws, msg, '角色别名写入失败，请稍后重试。');
+    REVIEW.pending.push({
+      type: REVIEW_TYPE_CHAR, char: ch.id, name: ch.name,
+      alias, by: (msg.sender && msg.sender.user_id) || '', at: new Date().toISOString(),
+    });
+    saveReview();
+    replyText(ws, msg, `已为「${ch.name}」添加别名：${alias}\n现有别名：${[...new Set(charNames(ch))].join('、')}`);
   }
 
   /** 管理员：/on待审核 */
@@ -1211,16 +1320,26 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     if (p.err) return replyText(ws, msg, `${p.err}\n${pendingText()}`);
     const picked = p.idx.map((i) => REVIEW.pending[i]);
     for (const it of picked) {
-      const key = String(it.song);
-      const left = (ALIASES[key] || []).filter((x) => norm(x) !== norm(it.alias));
-      if (left.length) ALIASES[key] = left; else delete ALIASES[key];
-      if (!isBlocked(it.song, it.alias)) {
-        REVIEW.blocked.push({ type: REVIEW_TYPE, song: it.song, name: it.name || '',
-          alias: it.alias, by: (msg.sender && msg.sender.user_id) || '', at: new Date().toISOString() });
+      const type = it.type || REVIEW_TYPE;
+      if (type === REVIEW_TYPE_CHAR) {
+        const key = String(it.char);
+        const left = (CHAR_ALIASES[key] || []).filter((x) => norm(x) !== norm(it.alias));
+        if (left.length) CHAR_ALIASES[key] = left; else delete CHAR_ALIASES[key];
+      } else {
+        const key = String(it.song);
+        const left = (ALIASES[key] || []).filter((x) => norm(x) !== norm(it.alias));
+        if (left.length) ALIASES[key] = left; else delete ALIASES[key];
+      }
+      const id = type === REVIEW_TYPE_CHAR ? it.char : it.song;
+      if (!isBlocked(type, id, it.alias)) {
+        REVIEW.blocked.push({ type, song: type === REVIEW_TYPE ? it.song : undefined,
+          char: type === REVIEW_TYPE_CHAR ? it.char : undefined,
+          name: it.name || '', alias: it.alias,
+          by: (msg.sender && msg.sender.user_id) || '', at: new Date().toISOString() });
       }
     }
     REVIEW.pending = REVIEW.pending.filter((x) => !picked.includes(x));
-    saveAliases(); saveReview();
+    saveAliases(); saveCharAliases(); saveReview();
     replyText(ws, msg, `已阻止 ${picked.length} 条：${picked.map(fmtItem).join('、')}\n\n${pendingText()}`);
   }
 
@@ -1323,8 +1442,285 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     });
   }
 
+  // ---------------- 小游戏：/on猜卡 /on猜曲 /on猜语音 + /on回答 /on结束
+  // 一局一题，按会话（群 / 私聊）存；答对或 /on结束 收局。答案用「模糊匹配 + 别名」判定。
+  const GAMES = new Map();                     // 'g:<群号>' / 'p:<QQ>' -> 当前这一局
+  const GAME_TTL_MS = 30 * 60 * 1000;          // 半小时没动静就作废
+  const GAME_KIND = { card: '猜卡', song: '猜曲', voice: '猜语音' };
+  const GAME_HINT_AT = 3;                      // 答错几次给提示
+  const GAME_GIVEUP_AT = 6;                    // 答错几次自动公布答案
+  const CARD_CROP = { 大: 240, 中: 160, 小: 100, 简单: 240, 普通: 160, 困难: 100, 难: 100, 易: 240 };
+  const CLIP_SECONDS = 3;
+
+  const gameKey = (msg) => (msg.message_type === 'private' ? 'p:' + msg.sender.user_id : 'g:' + msg.group_id);
+
+  /** 编辑距离（答案都不长，够用） */
+  function editDistance(a, b) {
+    const m = a.length, n = b.length;
+    if (!m) return n;
+    if (!n) return m;
+    let prev = [];
+    for (let j = 0; j <= n; j++) prev[j] = j;
+    for (let i = 1; i <= m; i++) {
+      const cur = [i];
+      for (let j = 1; j <= n; j++) {
+        cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      }
+      prev = cur;
+    }
+    return prev[n];
+  }
+
+  /** 猜答案判定：完全一致优先 → 互为子串 → 编辑距离在容差内；命中返回 {how} */
+  function guessHit(text, accept) {
+    const s = norm(text);
+    if (!s) return null;
+    const names = (accept || []).map((raw) => ({ raw: raw, n: norm(raw) })).filter((x) => x.n);
+    for (const x of names) if (x.n === s) return { how: '' };
+    for (const x of names) {
+      if (s.length >= 2 && (x.n.includes(s) || s.includes(x.n))) return { how: `算作「${x.raw}」` };
+      const d = editDistance(s, x.n);
+      const tol = x.n.length <= 3 ? 0 : (x.n.length <= 6 ? 1 : 2);
+      if (d > 0 && d <= tol) return { how: `算作「${x.raw}」` };
+    }
+    return null;
+  }
+
+  function roundOf(msg) {
+    const k = gameKey(msg);
+    const r = GAMES.get(k);
+    if (!r) return null;
+    if (Date.now() - r.at > GAME_TTL_MS) { dropRound(k); return null; }
+    return r;
+  }
+
+  function dropRound(key) {
+    const r = GAMES.get(key);
+    GAMES.delete(key);
+    if (r && r.file) { try { fs.unlinkSync(r.file); } catch (e) {} }
+  }
+
+  /** 谜面文件都在 /tmp/guess_*：开局时顺手清掉 6 小时前的（收局会删，没答的靠这个兜底） */
+  function sweepGuessTmp() {
+    try {
+      const now = Date.now();
+      for (const f of fs.readdirSync('/tmp')) {
+        if (f.indexOf('guess_') !== 0) continue;
+        const p = path.join('/tmp', f);
+        try { if (now - fs.statSync(p).mtimeMs > 6 * 3600 * 1000) fs.unlinkSync(p); } catch (e) {}
+      }
+    } catch (e) {}
+  }
+
+  /** ffprobe 时长（秒）；拿不到就返回 0 */
+  function audioSeconds(file) {
+    return new Promise((resolve) => {
+      const c = spawn('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', file]);
+      let out = '';
+      c.stdout.on('data', (d) => { out += d.toString(); });
+      c.on('error', () => resolve(0));
+      c.on('close', () => resolve(Number(String(out).trim()) || 0));
+    });
+  }
+
+  /** 从 mp3 里剪一段（默认 3 秒）做谜面；开头 3 秒通常是前奏，尽量避开 */
+  async function clipAudio(src, out, seconds) {
+    const secs = seconds || CLIP_SECONDS;
+    const dur = await audioSeconds(src);
+    let start = 0;
+    if (dur > secs + 6) start = 3 + Math.random() * (dur - secs - 6);
+    else if (dur > secs + 1) start = Math.random() * (dur - secs - 0.5);
+    await new Promise((res, rej) => {
+      const c = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y',
+        '-ss', start.toFixed(2), '-t', String(secs), '-i', src,
+        '-codec:a', 'libmp3lame', '-b:a', '128k', out]);
+      let log = '';
+      c.stderr.on('data', (d) => { log += d.toString(); });
+      c.on('close', (code) => (code === 0 && fs.existsSync(out)
+        ? res() : rej(new Error('剪音频失败: ' + log.slice(-120)))));
+    });
+    return { start, dur, secs };
+  }
+
+  const guessPrompt = (r) => {
+    const head = r.type === 'song' ? '听 3 秒，猜猜是哪首歌'
+      : r.type === 'voice' ? '听 3 秒，猜猜这是哪个角色的语音'
+        : '看这一小块卡面，猜猜是哪个角色';
+    return `${GAME_KIND[r.type]}：${head}\n发 /on回答 <答案>，放弃就发 /on结束。`;
+  };
+
+  /** 开一局：记状态 → 发提示文字 → 发谜面（图片或语音） */
+  function openRound(ws, msg, r, file, segs) {
+    dropRound(gameKey(msg));
+    sweepGuessTmp();
+    r.at = Date.now();
+    r.tries = 0;
+    r.file = file || null;
+    GAMES.set(gameKey(msg), r);
+    console.log(`[on] ${GAME_KIND[r.type]}开局 key=${gameKey(msg)} 答案=${r.answer.label}`);
+    replyText(ws, msg, guessPrompt(r));
+    if (segs) {
+      const t = target(msg);
+      sendReply(ws, t.action, Object.assign({}, t.base, { message: segs }));
+    }
+  }
+
+  const fileSeg = (type, f) => [{ type: type, data: { file: 'file://' + f } }];
+
+  /** 猜卡：随机一张非 R 卡，剪卡面极小一块当谜面 */
+  async function handleGuessCard(ws, msg, arg) {
+    if (!INDEX) return replyText(ws, msg, '卡片数据缺失（先让管理员跑 /on更新 主数据）');
+    const key = String(arg || '').trim();
+    let size = CARD_CROP['中'];
+    if (key) {
+      const s = CARD_CROP[key] || (/^\d{2,4}$/.test(key) ? Number(key) : null);
+      if (!s) return replyText(ws, msg, helpFor('猜卡'));
+      size = s;
+    }
+    const pool = INDEX.cards.filter((c) => c.rarity !== 2);        // 除 R 级
+    for (let i = 0; i < 12; i++) {
+      const c = pool[Math.floor(Math.random() * pool.length)];
+      const ch = INDEX.characters.find((x) => x.id === c.char);
+      if (!ch) continue;
+      const out = path.join('/tmp', `guess_card_${c.id}_${Math.random().toString(36).slice(2, 8)}.png`);
+      try {
+        await runPy(['guessimg.py', '--id', String(c.id), '--size', String(size), '--out', out], out);
+        const r = { type: 'card', answer: { label: ch.name, accept: charNames(ch), char: ch.id, card: c.id },
+          hint: `提示：这个角色属于 ${ch.band || '？'}` };
+        return openRound(ws, msg, r, out, fileSeg('image', out));
+      } catch (e) { /* 这张没有完整卡面，换一张 */ }
+    }
+    return replyText(ws, msg, '拿不到可用的卡面，稍后再试。');
+  }
+
+  /** 猜曲：随机一首曲子，剪 3 秒 */
+  async function handleGuessSong(ws, msg) {
+    if (!SONGS || !SONGS.songs.length) return replyText(ws, msg, '曲目数据缺失（先让管理员跑 /on更新 主数据）');
+    const all = SONGS.songs.filter((s) => s.acbBundle);
+    const cached = all.filter((s) => fs.existsSync(path.join(AUDIO_DIR, `${s.id}.mp3`))
+      || fs.existsSync(path.join(AUDIO_DIR, `${s.id}.short.mp3`)));
+    const pool = cached.length ? cached : all;
+    let lastErr = null;
+    for (let i = 0; i < 3; i++) {
+      const song = pool[Math.floor(Math.random() * pool.length)];
+      const out = path.join('/tmp', `guess_song_${song.id}_${Math.random().toString(36).slice(2, 8)}.mp3`);
+      try {
+        const mp3 = await ensureAudio(song, { short: !cached.length });
+        const info = await clipAudio(mp3, out);
+        const r = { type: 'song', answer: { label: songLabel(song), accept: songNames(song), song: song.id },
+          hint: `提示：这首歌来自 ${bandNameOf(song)}` };
+        return openRound(ws, msg, r, out, fileSeg('record', out));
+      } catch (e) {
+        lastErr = e;
+        console.error('[on] 猜曲准备失败:', errText(e));
+      }
+    }
+    return replyText(ws, msg, '音频拿不到，稍后再试。' + (lastErr ? '（' + errText(lastErr) + '）' : ''));
+  }
+
+  /** 猜语音：随机一条角色语音，剪 3 秒 */
+  async function handleGuessVoice(ws, msg) {
+    const all = voices();
+    if (!all.length) return replyText(ws, msg, '语音数据缺失（先让管理员跑 /on更新 主数据）');
+    const usable = [];
+    for (const v of all) {
+      const info = soundMap().get(v.soundId) || {};
+      const pack = voicePack(info.sheet);
+      if (pack) usable.push({ v, info, pack });
+    }
+    if (!usable.length) return replyText(ws, msg, '没有可播放的语音（跑 tools/cri_url.py 更新 cri_url.json）');
+    let lastErr = null;
+    for (let i = 0; i < 4; i++) {
+      const pick = usable[Math.floor(Math.random() * usable.length)];
+      const ch = INDEX && INDEX.characters.find((c) => c.id === pick.v.char);
+      if (!ch) continue;
+      const out = path.join('/tmp', `guess_voice_${pick.v.soundId}_${Math.random().toString(36).slice(2, 8)}.mp3`);
+      try {
+        const mp3 = await ensureVoice({ soundId: pick.v.soundId, cueName: pick.info.cue, sheetName: pick.info.sheet }, pick.pack);
+        const info = await clipAudio(mp3, out);
+        const r = { type: 'voice', answer: { label: ch.name, accept: charNames(ch), char: ch.id },
+          hint: `提示：这个角色属于 ${ch.band || '？'}` };
+        return openRound(ws, msg, r, out, fileSeg('record', out));
+      } catch (e) {
+        lastErr = e;
+        console.error('[on] 猜语音准备失败:', errText(e));
+      }
+    }
+    return replyText(ws, msg, '语音拿不到，稍后再试。' + (lastErr ? '（' + errText(lastErr) + '）' : ''));
+  }
+
+  /** 曲子的团体名（谜面提示用） */
+  function bandNameOf(song) {
+    try {
+      const b = song.band;
+      if (Array.isArray(b) && b.length) return b.map((x) => x.name).join(' / ');
+      if (typeof b === 'string' && b.trim()) {
+        const m = /'name':\s*'([^']+)'/.exec(b);
+        if (m) return m[1];
+      }
+    } catch (e) {}
+    return '？';
+  }
+
+  /** 卡面整图（公布答案时一起发） */
+  function fullArtOf(cardId) {
+    for (const ext of ['.png', '.jpg', '.jpeg']) {
+      const p = path.join(ON_DIR, 'art', 'full', cardId + ext);
+      if (fs.existsSync(p)) return p;
+    }
+    return null;
+  }
+
+  function revealRound(ws, msg, r, why) {
+    replyText(ws, msg, `${why}答案是「${r.answer.label}」。`);
+    if (r.type === 'card' && r.answer.card) {
+      const f = fullArtOf(r.answer.card);
+      if (f) replyImage(ws, msg, f);
+    }
+  }
+
+  function handleAnswer(ws, msg, arg) {
+    const guess = String(arg || '').trim();
+    const r = roundOf(msg);
+    if (!r) return replyText(ws, msg, '现在没有进行中的游戏。发 /on猜卡、/on猜曲 或 /on猜语音 开一局。');
+    if (!guess) return replyText(ws, msg, '用法：/on回答 <你猜的名字>');
+    const hit = guessHit(guess, r.answer.accept);
+    if (hit) {
+      dropRound(gameKey(msg));
+      replyText(ws, msg, `答对了！${hit.how ? hit.how + '，' : ''}答案是「${r.answer.label}」` +
+        (r.tries ? `（第 ${r.tries + 1} 次猜中）` : ''));
+      if (r.type === 'card' && r.answer.card) {
+        const f = fullArtOf(r.answer.card);
+        if (f) replyImage(ws, msg, f);
+      }
+      return;
+    }
+    r.tries++;
+    if (r.tries >= GAME_GIVEUP_AT) {
+      dropRound(gameKey(msg));
+      return revealRound(ws, msg, r, `猜了 ${r.tries} 次都没对，`);
+    }
+    if (r.tries === GAME_HINT_AT && r.hint) {
+      return replyText(ws, msg, `还不对。${r.hint}`);
+    }
+    return replyText(ws, msg, '不对，再想想～' + (r.hint && r.tries > GAME_HINT_AT ? '　' + r.hint : ''));
+  }
+
+  function handleEnd(ws, msg) {
+    const r = roundOf(msg);
+    if (!r) return replyText(ws, msg, '现在没有进行中的游戏。');
+    dropRound(gameKey(msg));
+    revealRound(ws, msg, r, '这局结束了，');
+  }
+
   // ---------------- 匹配注册
   const defs = [
+    { re: /^\s*\/on(?:guesscard|猜卡|gcard)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleGuessCard(ws, msg, m[1] || ''), shortOnly: true },
+    { re: /^\s*\/on(?:guesssong|猜曲|gsong)\s*([\s\S]*)$/i, run: (ws, msg) => handleGuessSong(ws, msg), shortOnly: true },
+    { re: /^\s*\/on(?:guessvoice|猜语音|gvoice)\s*([\s\S]*)$/i, run: (ws, msg) => handleGuessVoice(ws, msg), shortOnly: true },
+    { re: /^\s*\/on(?:answer|回答|答)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleAnswer(ws, msg, m[1] || ''), shortOnly: true },
+    { re: /^\s*\/on(?:end|结束|放弃)\s*([\s\S]*)$/i, run: (ws, msg) => handleEnd(ws, msg), shortOnly: true },
+    { re: /^\s*\/on(?:charalias|角色别名)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleCharAlias(ws, msg, m[1] || '') },
     { re: /^\s*\/on(?:card|查卡)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleCard(ws, msg, m[1] || '') },
     { re: /^\s*\/on(?:voice|语音|听)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleVoice(ws, msg, m[1] || '') },
     { re: /^\s*\/on(?:comic|小漫画|漫画)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleComic(ws, msg, m[1] || '') },
@@ -1346,6 +1742,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
   for (const d of defs) {
     commands.push({
       ignoreAt: true,
+      shortOnly: !!d.shortOnly,
       match(plainText) {
         const m = d.re.exec(plainText || '');
         return m ? { m } : false;
@@ -1356,7 +1753,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     });
   }
 
-  console.log('Our Notes 指令已注册: /on查卡 /oncard /on查曲 /on听曲 /on听 /on谱面预览 /on查谱面 /on小漫画 /on卡池 /on贴纸 /on难度排行 /on效益排行 /on效率排行 /on添加别名 /on待审核 /on通过 /on阻止 /on更新 /onhelp'
+  console.log('Our Notes 指令已注册: /on查卡 /oncard /on查曲 /on听曲 /on听 /on谱面预览 /on查谱面 /on小漫画 /on卡池 /on贴纸 /on难度排行 /on效益排行 /on效率排行 /on猜卡 /on猜曲 /on猜语音 /on回答 /on结束 /on添加别名 /on角色别名 /on待审核 /on通过 /on阻止 /on更新 /onhelp'
     + `（角色 ${INDEX ? INDEX.characters.length : 0} / 卡片 ${INDEX ? INDEX.cards.length : 0} / 曲目 ${SONGS ? SONGS.songs.length : 0}`
     + `，别名 ${Object.keys(ALIASES).length} 条，CRI密钥 ${process.env.ON_CRI_KEY ? '已配置' : '未配置'}）`);
 }
