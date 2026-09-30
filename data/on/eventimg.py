@@ -43,6 +43,8 @@ RARITY = {4: 'SSR', 3: 'SR', 2: 'R', 10: 'BD', 20: 'EX'}
 RARITY_COLOR = {'SSR': (255, 214, 120), 'SR': (150, 200, 255), 'R': (200, 206, 220),
                 'BD': (255, 170, 200), 'EX': (190, 160, 255)}
 BONUS_KIND = {2: '成员卡', 3: '留影卡'}
+TYPE_ICON = {1: 'type1_red.png', 2: 'type2_blue.png', 3: 'type3_green.png',
+             4: 'type4_gold.png', 5: 'type5_purple.png'}      # data/on/ui/ 里的属性图标
 
 
 def load(name):
@@ -76,13 +78,13 @@ def pick_event(now=None):
     return (run or evs)[-1] if (run or evs) else None
 
 
-def event_asset(asset, cache_name):
-    """活动素材：本地缓存优先，否则调 node 从 bundle 解出来"""
+def event_asset(asset, cache_name, sub='event'):
+    """素材（活动主视觉 / 团队 logo …）：本地缓存优先，否则调 node 从 bundle 解出来"""
     if not asset:
         return None
-    out = os.path.join(EVENT_ART, cache_name + '.png')
+    out = os.path.join(ON, 'art', sub, cache_name + '.png')
     if not (os.path.exists(out) and os.path.getsize(out) > 512):
-        os.makedirs(EVENT_ART, exist_ok=True)
+        os.makedirs(os.path.dirname(out), exist_ok=True)
         ex = os.path.join(ROOT, 'tools', 'export_asset.js')
         p = subprocess.run(['node', ex, '--asset', asset, '--out', out],
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -124,6 +126,7 @@ def gather():
         if r.get('_eventId') != ev['_id']:
             continue
         kind = BONUS_KIND.get(r.get('_resourceTypeConstraint'), '其它')
+        icon = None
         if r.get('_memberCardId'):
             who = card_label(r['_memberCardId'])
         elif r.get('_supportCardId'):
@@ -132,8 +135,10 @@ def gather():
         elif r.get('_bandId'):
             b = bands.get(r['_bandId'])
             who = (tx(b['_nameTextID']) if b else ('团体%s' % r['_bandId'])) + '（团体）'
+            icon = ('band', r['_bandId'])
         elif r.get('_cardType'):
             who = (color_names.get(r['_cardType']) or ('属性%s' % r['_cardType'])) + '（属性）'
+            icon = ('type', r['_cardType'])
         elif r.get('_characterId'):
             ch = chars.get(r['_characterId'])
             who = (tx(ch['_nameTextID']) if ch else ('角色%s' % r['_characterId'])) + '（角色）'
@@ -141,7 +146,7 @@ def gather():
             continue
         lo = r.get('_rank1EffectValue') or 0
         hi = r.get('_rank5EffectValue') or lo
-        item = {'who': who, 'lo': lo / 100.0, 'hi': hi / 100.0, 'type': r.get('_eventBonusType')}
+        item = {'who': who, 'lo': lo / 100.0, 'hi': hi / 100.0, 'type': r.get('_eventBonusType'), 'icon': icon}
         item['kind'] = kind
         key = (kind, who)
         if key not in bonus or (item['type'] == 0 and bonus[key]['type'] != 0):
@@ -242,21 +247,17 @@ def text_of(info):
     return '\n'.join(L)
 
 
-def acrylic(cover, top_frac, alpha=175, blur=16):
-    """把封面下沿做成「深色亚克力」：高斯模糊 + 压暗 + 自上而下渐隐的遮罩"""
+def gradient_mask(cover, band_h, color=(9, 11, 20)):
+    """封面下沿压一层「由浅入深」的遮罩：最上面 alpha=0，最下面 100% 纯色，中间线性渐变"""
     w, h = cover.size
-    band_h = max(80, int(h * (1 - top_frac)))
-    band = cover.crop((0, h - band_h, w, h)).convert('RGB')
-    band = band.filter(ImageFilter.GaussianBlur(blur))
-    dark = Image.new('RGB', band.size, (10, 12, 20))
-    band = Image.blend(band, dark, 0.62)
-    mask = Image.new('L', band.size, 0)
-    mp = mask.load()
+    band_h = max(40, min(band_h, h))
+    band = Image.new('RGBA', (w, band_h), color + (0,))
+    px = band.load()
     for y in range(band_h):
-        mp_row = int(alpha * min(1.0, (y / max(1, band_h * 0.45))))
+        a = int(round(255 * (y / max(1, band_h - 1))))
         for x in range(w):
-            mp[x, y] = mp_row
-    cover.paste(band, (0, h - band_h), mask)
+            px[x, y] = (color[0], color[1], color[2], a)
+    cover.alpha_composite(band, (0, h - band_h))
     return band_h
 
 
@@ -272,8 +273,8 @@ def render(info, out_path, fonts, scale=1.0):
     if top is not None:
         top_h = round(top.height * W / top.width)
         top = top.resize((W, top_h), Image.LANCZOS).convert('RGBA')
-    song_rows = max(1, len(songs))
-    overlay_h = 52 + 30 + song_rows * 34            # 期间/道具一行 + 活动曲若干行
+    JACKET = 84                                      # 活动曲曲绘（横排）
+    overlay_h = 46 + 34 + JACKET + 34                # 期间/道具一行 + 曲绘行 + 曲名行
     pick_h = 306 if picks else 0        # 卡面区 220 + 名字/角色两行（居中放置后标签统一在下方，留够高度）
     kinds = len({b['kind'] for b in bonus}) or 1
     bonus_h = 40 + (32 * kinds) + 30 * max(1, len(bonus)) + 10
@@ -294,26 +295,30 @@ def render(info, out_path, fonts, scale=1.0):
     y = HEAD
     if top is not None:
         canvas.paste(top, (0, y), top)
-        # 亚克力遮罩 + 把日期/道具/活动曲压在遮罩上
-        acrylic(canvas.crop((0, y, W, y + top_h)), 0.0, alpha=190, blur=18) if False else None
-        band = Image.new('RGBA', (W, top_h), (0, 0, 0, 0))
-        band.paste(top, (0, 0))
-        acrylic(band, max(0.0, 1 - (overlay_h + 30) / top_h), alpha=200, blur=18)
-        canvas.paste(band, (0, y), band)
+        # 由浅入深的遮罩（上 alpha=0 → 下 100% 纯色），信息压在遮罩上
+        gradient_mask(canvas, overlay_h + 24)
         oy = y + top_h - overlay_h - 6
-        dr.line([MARGIN, oy - 12, W - MARGIN, oy - 12], fill=(255, 255, 255, 60), width=1)
         dr.text((MARGIN, oy), '%s ~ %s' % (info['start'], info['end']), font=fonts.get(23, True), fill=(232, 238, 250))
         if info['item']:
             dr.text((W - MARGIN, oy), '活动道具：' + info['item'], font=fonts.get(23, True), fill=(190, 216, 255), anchor='ra')
-        oy += 32
+        oy += 34
+        # 活动曲：横着并列排布，只给曲绘 + 曲名（不要难度）
+        cell = (W - MARGIN * 2) // max(1, len(songs))
         for i, sg in enumerate(songs):
+            x = MARGIN + i * cell
+            jk = None
+            for ext in ('.jpg', '.png', '.jpeg'):
+                cand = os.path.join(ON, 'art', 'jacket', (sg.get('jacket') or '') + ext)
+                if os.path.exists(cand):
+                    jk = cand
+                    break
+            if jk:
+                art = C.rounded(Image.open(jk).convert('RGB').resize((JACKET, JACKET), Image.LANCZOS), 8)
+                canvas.paste(art, (x, oy), art)
             label = '活动曲' if len(songs) == 1 else '活动曲%d' % (i + 1)
-            dr.text((MARGIN, oy), label, font=fonts.get(21, True), fill=(255, 214, 120))
-            dr.text((MARGIN + 108, oy), sg['title'], font=fonts.get(23, True), fill=(248, 250, 255))
-            lv = '　'.join('%s %s' % (n, l) for n, l in sg['charts'])
-            dr.text((MARGIN + 108 + dr.textlength(sg['title'], font=fonts.get(23, True)) + 24, oy + 2),
-                    lv, font=fonts.get(19, False), fill=(206, 216, 236))
-            oy += 34
+            dr.text((x + JACKET + 12, oy + 8), label, font=fonts.get(19, True), fill=(255, 214, 120))
+            for k, line in enumerate(C.wrap(dr, sg['title'], fonts.get(23, True), cell - JACKET - 24, 2)):
+                dr.text((x + JACKET + 12, oy + 32 + k * 26), line, font=fonts.get(23, True), fill=(248, 250, 255))
         y += top_h
     y += 26
 
@@ -334,7 +339,8 @@ def render(info, out_path, fonts, scale=1.0):
             else:
                 f = os.path.join(ON, 'art', 'support', str(p['id']) + '.jpg')
                 if os.path.exists(f):
-                    art = C.rounded(Image.open(f).convert('RGB').resize((216, 122), Image.LANCZOS), 10)
+                    sw = round(216 * 16 / 9)      # 横版留影卡按「纵向与角色卡等长」放大：高 216 → 宽 384
+                    art = C.rounded(Image.open(f).convert('RGB').resize((sw, 216), Image.LANCZOS), 10)
             if art is not None:
                 canvas.paste(art, (x, y + (area_h - art.height) // 2), art)      # 中心对齐
             dr.text((x, label_y), '%s %s' % (p['rarity'], p['name']), font=fonts.get(20, True), fill=(240, 244, 252))
@@ -352,7 +358,24 @@ def render(info, out_path, fonts, scale=1.0):
             dr.text((MARGIN + 6, y), kind, font=fonts.get(22, True), fill=(255, 214, 120))
             y += 32
             for b in rows:
-                dr.text((MARGIN + 34, y), b['who'], font=fonts.get(21, True), fill=(236, 240, 250))
+                # 属性加成画属性图标、团队加成画团队 logo，都缩放到和这一行文字一样高
+                ic = None
+                src = b.get('icon')
+                if src and src[0] == 'type':
+                    pth = os.path.join(ON, 'ui', TYPE_ICON.get(src[1], ''))
+                    if os.path.exists(pth):
+                        ic = Image.open(pth).convert('RGBA')
+                elif src and src[0] == 'band':
+                    ic = event_asset('Band/%s/band_logo' % src[1], 'band_' + str(src[1]), sub='band')
+                if ic is not None:
+                    ih = 24
+                    iw = max(1, round(ic.width * ih / ic.height))
+                    ic = ic.resize((iw, ih), Image.LANCZOS)
+                    canvas.paste(ic, (MARGIN + 34, y - 2), ic)
+                    tx0 = MARGIN + 34 + iw + 8
+                else:
+                    tx0 = MARGIN + 34
+                dr.text((tx0, y), b['who'], font=fonts.get(21, True), fill=(236, 240, 250))
                 dr.text((MARGIN + 700, y), '+%g%% → +%g%%' % (b['lo'], b['hi']), font=fonts.get(21, True),
                         fill=(150, 226, 170))
                 y += 30
