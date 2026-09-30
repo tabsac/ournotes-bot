@@ -719,6 +719,25 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
   };
   const errText = (e) => String((e && e.message) || e).slice(0, 140);
 
+  /** 卡面目录最后变动时间：新卡面/新缩略图写进来时目录 mtime 会变。
+   *  卡片图是按 id 缓存的，缓存比卡面旧就说明「这张是缺图时画的」，必须重画
+   *  （踩过：新卡上线后 /on查卡 一直发旧图，因为 detail_61.png / grid_15.png 是缺图时生成的）。 */
+  function artStamp() {
+    let t = 0;
+    for (const d of ['thumb', 'full']) {
+      try { t = Math.max(t, fs.statSync(path.join(ON_DIR, 'art', d)).mtimeMs); } catch (e) {}
+    }
+    return t;
+  }
+
+  /** 缓存文件是否还新（比卡面目录新才算新） */
+  function cacheFresh(file) {
+    try {
+      if (!fs.existsSync(file) || fs.statSync(file).size < 1024) return false;
+      return fs.statSync(file).mtimeMs >= artStamp();
+    } catch (e) { return false; }
+  }
+
   // ---------------- 卡片
   async function handleCard(ws, msg, arg) {
     const q = parseCardQuery(arg);
@@ -726,10 +745,13 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     if (q.kind === 'detail') {
       try {
         const out = path.join(CACHE_DIR, `detail_${q.id}.png`);
-        const f = fs.existsSync(out) ? out : await runPy(['cardimg.py', 'detail', '--id', String(q.id), '--out', out], out);
+        const f = cacheFresh(out) ? out : await runPy(['cardimg.py', 'detail', '--id', String(q.id), '--out', out], out);
         return replyImage(ws, msg, f);
       } catch (e) {
-        if (/没有 ID=/.test(errText(e))) return replyText(ws, msg, `没有 ID=${q.id} 的卡片（本版本共 60 张：1–60）。`);
+        if (/没有 ID=/.test(errText(e))) {
+          const n = INDEX && INDEX.cards.length ? INDEX.cards.length : 0;
+          return replyText(ws, msg, `没有 ID=${q.id} 的卡片（本版本共 ${n} 张：1–${n}）。`);
+        }
         console.error('[on] 详情失败:', errText(e));
         return replyText(ws, msg, '图片生成失败：' + errText(e));
       }
@@ -747,7 +769,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
       const key = ('sel_' + norm(sel.label) + (q.rarity ? '_' + q.rarity : '')).replace(/[^\w\u4e00-\u9fa5]+/g, '_');
       const out = path.join(CACHE_DIR, key + '.png');
       try {
-        const f = fs.existsSync(out) ? out
+        const f = cacheFresh(out) ? out
           : await runPy(['cardimg.py', 'grid', '--ids', picked.map((c) => c.id).join(','),
             '--title', sel.label,
             '--sub', (q.rarity ? q.rarity + ' ・ ' : '') + picked.length + ' 张',
@@ -775,7 +797,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     const key = `grid_${ch.id}${q.rarity ? '_' + q.rarity : ''}`;
     const out = path.join(CACHE_DIR, key + '.png');
     try {
-      const f = fs.existsSync(out) ? out
+      const f = cacheFresh(out) ? out
         : await runPy(['cardimg.py', 'grid', '--char', ch.name].concat(q.rarity ? ['--rarity', q.rarity] : []).concat(['--out', out]), out);
       return replyImage(ws, msg, f);
     } catch (e) {

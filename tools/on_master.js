@@ -22,8 +22,7 @@ const { execFileSync } = require('child_process');
 
 const ON = '/home/admin/bot/data/on';
 const BASE_ROOT = 'https://l14-prod-hk-patch-sirius.gamerfusiontech.com/prod/hk_27f3c91e8b62d6056c7a19f2e83b6d10';
-const { need: needSecret } = require('../lib/secrets.js');
-const AUTH = needSecret('cdnAuth', 'ON_CDN_AUTH', 'CDN Basic 凭据 user:pass');
+const AUTH = 'sirius:pXrQcRvnwkux6hp89OpgFHytDjm2DTM';
 const API_HOST = 'https://l14-prod-hk-all-gs-sirius.gamerfusiontech.com';
 const VERSION_RPC = API_HOST + '/app.masterdata.MasterdataService/Version';
 const MASTER_DIR = path.join(ON, 'master');
@@ -150,6 +149,19 @@ function masterVersion() {
           gen.failed.push({ label, error: msg });
           log(`     重建 ${label} 失败：${msg}`);
         }
+      }
+      // 新卡还需要卡面文件（art/thumb|full/<id>.jpg）：主数据有了但图没解出来时，
+      // /on查卡 会画成灰块（踩过：63 张卡里新加的 61–63 一直没图）。这里顺手补齐。
+      try {
+        const out = execFileSync('node', [path.join(__dirname, 'fetch_card_art.js')],
+                                 { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10 * 60 * 1000 });
+        const last = String(out).trim().split('\n').filter(Boolean).pop() || '';
+        gen.ok.push('卡面');
+        log(`     补齐卡面：${last.slice(0, 140)}`);
+      } catch (e) {
+        const msg = String(e.stderr || e.message).trim().slice(0, 200);
+        gen.failed.push({ label: '卡面', error: msg });
+        log(`     补齐卡面失败：${msg}`);
       }
       result.regenerated = gen;
     }
