@@ -45,6 +45,9 @@ RARITY_COLOR = {'SSR': (255, 214, 120), 'SR': (150, 200, 255), 'R': (200, 206, 2
 BONUS_KIND = {2: '成员卡', 3: '留影卡'}
 TYPE_ICON = {1: 'type1_red.png', 2: 'type2_blue.png', 3: 'type3_green.png',
              4: 'type4_gold.png', 5: 'type5_purple.png'}      # data/on/ui/ 里的属性图标
+DIFF_COLOR = {'EASY': (66, 133, 214), 'NORMAL': (66, 176, 108), 'HARD': (226, 170, 52),
+              'EXPERT': (214, 74, 74), 'MASTER': (146, 94, 214)}   # 难度徽章底色（字是白的）
+GOLD = (255, 208, 96)
 
 
 def load(name):
@@ -276,13 +279,19 @@ def render(info, out_path, fonts, scale=1.0):
     if top is not None:
         top_h = round(top.height * W / top.width)
         top = top.resize((W, top_h), Image.LANCZOS).convert('RGBA')
-    JACKET = 84                                      # 活动曲曲绘（横排）
-    overlay_h = 46 + 34 + JACKET + 34                # 期间/道具一行 + 曲绘行 + 曲名行
+    OVERLAY_LINE = 46                                # 遮罩里只有「期间 / 活动道具」一行
+    overlay_h = OVERLAY_LINE
+    # 活动曲：金色标题 + 每行 3 个（标题 / 曲绘 / 难度徽章）
+    SONG_COLS = 3
+    cell_w = (W - MARGIN * 2 - 18 * (SONG_COLS - 1)) // SONG_COLS
+    jacket = min(cell_w - 24, 264)
+    song_rows = max(1, (len(songs) + SONG_COLS - 1) // SONG_COLS) if songs else 0
+    song_block = (44 + song_rows * (58 + jacket + 42 + 16)) if songs else 0
     pick_h = 306 if picks else 0        # 卡面区 220 + 名字/角色两行（居中放置后标签统一在下方，留够高度）
     kinds = len({b['kind'] for b in bonus}) or 1
     bonus_h = 40 + (32 * kinds) + 30 * max(1, len(bonus)) + 10
     mile_h = 40 + 30 * ((len(miles) + 2) // 3)
-    H = HEAD + (top_h if top_h else 0) + 26 + pick_h + bonus_h + mile_h + 90
+    H = HEAD + (top_h if top_h else 0) + 20 + song_block + 16 + pick_h + bonus_h + mile_h + 90
 
     canvas = C.vertical_gradient(W, H, (26, 30, 48), (14, 16, 26)).convert('RGBA')
     dr = ImageDraw.Draw(canvas)
@@ -300,16 +309,22 @@ def render(info, out_path, fonts, scale=1.0):
         canvas.paste(top, (0, y), top)
         # 遮罩：从封面下部一直铺到整张图的最下面；最上 15% 由透明渐入，其余 100% 纯色。
         # 下面所有内容（日期 / 活动道具 / 活动曲 / Pick Up / 加成 / 点数奖励）都画在它上面。
-        gradient_mask(canvas, y + top_h - overlay_h - 40)
+        gradient_mask(canvas, y + top_h - overlay_h - 60)
         oy = y + top_h - overlay_h - 6
         dr.text((MARGIN, oy), '%s ~ %s' % (info['start'], info['end']), font=fonts.get(23, True), fill=(232, 238, 250))
         if info['item']:
             dr.text((W - MARGIN, oy), '活动道具：' + info['item'], font=fonts.get(23, True), fill=(190, 216, 255), anchor='ra')
-        oy += 34
-        # 活动曲：横着并列排布，只给曲绘 + 曲名（不要难度）
-        cell = (W - MARGIN * 2) // max(1, len(songs))
+        y += top_h
+    # ---- 活动曲：金色标题，下面每行 3 个（曲名 / 曲绘 / 难度徽章）----
+    if songs:
+        dr.text((MARGIN, y + 8), '活动曲', font=fonts.get(30, True), fill=GOLD)
+        y += 44
         for i, sg in enumerate(songs):
-            x = MARGIN + i * cell
+            r, col = divmod(i, SONG_COLS)
+            x = MARGIN + col * (cell_w + 18)
+            cy = y + r * (58 + jacket + 42 + 16)
+            for k, line in enumerate(C.wrap(dr, sg['title'], fonts.get(23, True), cell_w, 2)):
+                dr.text((x + cell_w / 2, cy + k * 26), line, font=fonts.get(23, True), fill=(244, 247, 255), anchor='ma')
             jk = None
             for ext in ('.jpg', '.png', '.jpeg'):
                 cand = os.path.join(ON, 'art', 'jacket', (sg.get('jacket') or '') + ext)
@@ -317,13 +332,22 @@ def render(info, out_path, fonts, scale=1.0):
                     jk = cand
                     break
             if jk:
-                art = C.rounded(Image.open(jk).convert('RGB').resize((JACKET, JACKET), Image.LANCZOS), 8)
-                canvas.paste(art, (x, oy), art)
-            label = '活动曲' if len(songs) == 1 else '活动曲%d' % (i + 1)
-            dr.text((x + JACKET + 12, oy + 8), label, font=fonts.get(19, True), fill=(255, 214, 120))
-            for k, line in enumerate(C.wrap(dr, sg['title'], fonts.get(23, True), cell - JACKET - 24, 2)):
-                dr.text((x + JACKET + 12, oy + 32 + k * 26), line, font=fonts.get(23, True), fill=(248, 250, 255))
-        y += top_h
+                art = C.rounded(Image.open(jk).convert('RGB').resize((jacket, jacket), Image.LANCZOS), 10)
+                canvas.paste(art, (x + (cell_w - jacket) // 2, cy + 58), art)
+            # 难度徽章：圆角矩形 + 白字，按难度配色；**整行的宽度不超过曲绘宽度**（居中于曲绘下方）
+            gap, bh = 8, 30
+            n = max(1, len(sg['charts']))
+            bw = min(74, (jacket - (n - 1) * gap) // n)
+            bf = fonts.get(19 if bw >= 66 else (18 if bw >= 56 else 16), True)
+            bx = x + (cell_w - (n * bw + (n - 1) * gap)) // 2
+            for name, lv in sg['charts']:
+                col2 = DIFF_COLOR.get(name, (110, 116, 132))
+                dr.rounded_rectangle([bx, cy + 58 + jacket + 8, bx + bw, cy + 58 + jacket + 8 + bh], 8, fill=col2)
+                dr.text((bx + bw / 2, cy + 58 + jacket + 8 + bh / 2), 'Lv.%s' % lv, font=bf,
+                        fill=(255, 255, 255), anchor='mm')
+                bx += bw + gap
+        y += song_rows * (58 + jacket + 42 + 16)
+        y += 16
     y += 26
 
     if picks:
