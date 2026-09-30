@@ -13,6 +13,7 @@
  *  图鉴
  *    /on小漫画 [角色]           随机一张加载漫画
  *    /on卡池                    当期招募一览图（封面 + 期间 + 概率 + Pick Up）
+ *    /on活动                    当期活动一览图（主视觉 + 活动曲 + Pick Up + 加成 + 点数奖励）
  *    /on贴纸 [角色]             贴纸图鉴
  *    /on难度排行 [难度] [整数]   难度排行图
  *    /on效益排行 [难度] [整数]   效益排行（单局理论最高分）
@@ -563,6 +564,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     '【图鉴・排行】',
     '/on小漫画 [角色]              随机一张加载漫画（不给角色就随机）',
     '/on卡池                       当期招募一览图（封面・概率・Pick Up）',
+    '/on活动                       当期活动一览图（活动曲・加成・点数奖励）',
     '/on贴纸 [角色]                贴纸图，不给角色就发全部',
     '/on难度排行 [难度] [整数]      难度排行图',
     '　例 /on难度排行 25（EXPERT 25.0~25.9）　/on难度排行 ex 25　/on难度排行 hd',
@@ -616,6 +618,9 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
       '用法 /on小漫画 [角色]',
       '随机发一张游戏的加载小漫画；写角色名就只看该角色的那几张（每个角色各有一张）。',
       '例 /on小漫画　/on小漫画 灯'],
+    '活动': ['/on活动（/onevent）',
+      '用法 /on活动',
+      '当前进行中的活动，画成一张图：活动主视觉、活动曲（含四难度等级）、Pick Up 卡、加成（成员卡 / 留影卡，界限突破 0→4 的百分比）、点数奖励档位。'],
     '卡池': ['/on卡池（/ongacha、/on招募）',
       '用法 /on卡池',
       '当前正在开的招募，画成一张图：卡池封面、活动期间、各星级概率、Pick Up 卡片。'],
@@ -678,6 +683,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     'chartinfo': '谱面预览', '查谱面': '谱面预览', '谱面数据': '谱面预览',
     'comic': '小漫画', '小漫画': '小漫画', '漫画': '小漫画',
     'gacha': '卡池', '卡池': '卡池', '招募': '卡池',
+    'event': '活动', '活动': '活动', '活动一览': '活动',
     'stamp': '贴纸', '贴纸': '贴纸',
     'rank': '难度排行', '难度排行': '难度排行', '排行': '难度排行',
     'benefit': '效益排行', '效益排行': '效益排行', '效益': '效益排行',
@@ -921,6 +927,16 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     push(load('CharacterVoice'), '_soundId', '_textId', '成长语音');
     push(load('LiveStartCharacterVoice'), '_voiceSoundId', '_voiceTextId', '演出开始');
     push(load('Talk'), '_voiceSoundId', '_textId', '首页对话');
+    // 卡池语音：MasterMemberCard._gachaVoiceSoundId（抽到该卡时的那句话）
+    // 这批音频是 bundle 内嵌路线（catalog 里没有 cri/sound/voicegacha_* location），
+    // voicePack() 会自动回退到 cri_assets_cri_sound_<sheet>_<hash>.bundle
+    for (const r of load('MemberCard')) {
+      const sid = r._gachaVoiceSoundId;
+      if (!sid || !r._characterID) continue;
+      const info = sm.get(sid);
+      if (!info || !info.cue || !info.sheet) continue;
+      VOICES.push({ char: r._characterID, soundId: sid, textId: r._gachaVoiceTextId, from: '抽卡语音' });
+    }
     console.log('[on] 角色语音清单 ' + VOICES.length + ' 条，覆盖角色 ' + new Set(VOICES.map((v) => v.char)).size + ' 个');
     return VOICES;
   }
@@ -1212,6 +1228,25 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
       } catch (e2) {
         console.error('[on] 卡池失败:', errText(e2));
         return replyText(ws, msg, '卡池读取失败：' + errText(e2));
+      }
+    }
+  }
+
+  // ---------------- 当期活动
+  async function handleEvent(ws, msg) {
+    // 和卡池一样：构造一张图（活动 Top 图 + 活动曲 + Pick Up + 加成 + 点数奖励）
+    const out = path.join(CACHE_DIR, 'event.png');
+    try {
+      try { fs.unlinkSync(out); } catch (e) {}      // 免得没出图时用了上一张旧的
+      await runPy(['eventimg.py', '--out', out], out);
+      return replyImage(ws, msg, out);
+    } catch (e) {
+      console.log('[on] 活动改为文本输出:', errText(e));
+      try {
+        return replyText(ws, msg, await runPyOut(['eventimg.py', '--text']));
+      } catch (e2) {
+        console.error('[on] 活动失败:', errText(e2));
+        return replyText(ws, msg, '活动读取失败：' + errText(e2));
       }
     }
   }
@@ -1930,6 +1965,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     { re: /^\s*\/on(?:efficiency|eff|效率排行|效率)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleEff(ws, msg, m[1] || '', 'eff') },
     { re: /^\s*\/on(?:stamp|贴纸)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleStamp(ws, msg, m[1] || '') },
     { re: /^\s*\/on(?:gacha|卡池|招募)\s*([\s\S]*)$/i, run: (ws, msg) => handleGacha(ws, msg) },
+    { re: /^\s*\/on(?:event|活动|活动一览)\s*([\s\S]*)$/i, run: (ws, msg) => handleEvent(ws, msg) },
     { re: /^\s*\/on(?:song|曲|查曲)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleSong(ws, msg, m[1] || '') },
     // 「听曲 / 听歌」必须排在「听」前面：/on听 的正则原先把 /on听歌 的「歌」当成参数吞掉（踩过）
     { re: /^\s*\/on(?:listen|听曲|听歌)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleListen(ws, msg, m[1] || '') },
@@ -1956,7 +1992,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     });
   }
 
-  console.log('Our Notes 指令已注册: /on查卡 /oncard /on查曲 /on听曲 /on听 /on谱面预览 /on查谱面 /on小漫画 /on卡池 /on贴纸 /on难度排行 /on效益排行 /on效率排行 /on猜卡 /on猜曲 /on猜语音 /回答 /结束 /on添加别名 /on角色别名 /on待审核 /on通过 /on阻止 /on更新 /onhelp'
+  console.log('Our Notes 指令已注册: /on查卡 /oncard /on查曲 /on听曲 /on听 /on谱面预览 /on查谱面 /on小漫画 /on卡池 /on活动 /on贴纸 /on难度排行 /on效益排行 /on效率排行 /on猜卡 /on猜曲 /on猜语音 /回答 /结束 /on添加别名 /on角色别名 /on待审核 /on通过 /on阻止 /on更新 /onhelp'
     + `（角色 ${INDEX ? INDEX.characters.length : 0} / 卡片 ${INDEX ? INDEX.cards.length : 0} / 曲目 ${SONGS ? SONGS.songs.length : 0}`
     + `，别名 ${Object.keys(ALIASES).length} 条，CRI密钥 ${process.env.ON_CRI_KEY ? '已配置' : '未配置'}）`);
 }

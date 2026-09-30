@@ -17,19 +17,21 @@
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
-const crypto = require('../data/on/unitysrc/crypto.js');
+const crypto = require('/home/admin/bot/data/on/unitysrc/crypto.js');
 const { execFileSync } = require('child_process');
 
 const ON = '/home/admin/bot/data/on';
 const BASE = 'https://l14-prod-hk-patch-sirius.gamerfusiontech.com/prod/hk_27f3c91e8b62d6056c7a19f2e83b6d10/asset/Android';
-const { need: needSecret } = require('../lib/secrets.js');
-const AUTH = needSecret('cdnAuth', 'ON_CDN_AUTH', 'CDN Basic 凭据 user:pass');
+const AUTH = 'sirius:pXrQcRvnwkux6hp89OpgFHytDjm2DTM';
 const API_HOST = 'https://l14-prod-hk-all-gs-sirius.gamerfusiontech.com';
 const VERSION_RPC = API_HOST + '/app.masterdata.MasterdataService/Version';
 const CATALOG_LOCALE = 'zh-Hans';
 const CATALOG_FALLBACK = 'catalog_1.0.0.104_zh-Hans.bin';
 const CATALOG_HASH = (n) => n.replace(/\.bin$/, '.hash');
 const STATE = path.join(ON, 'update_state.json');
+// 下下来的 catalog 要落盘：build_songs2.py / cri_url.py 都是读这个文件推包名/音频 URL 的，
+// 只写 inventory 不写 catalog 的话，新曲的谱面包名会算不出来（踩过：100109 谱面全 None）
+const CATALOG_FILE = path.join(ON, 'catalog.bin');
 const INVENTORY = path.join(ON, 'bundle_inventory.json');
 const DLDIR = path.join(ON, 'dl');
 const UA = 'UnityPlayer/6000.3.12f1 (UnityWebRequest/1.0, libcurl/8.10.1-DEV)';
@@ -167,8 +169,10 @@ function parseCatalog(buf) {
     process.exit(2);
   }
 
-  // 2) hash 未变 -> 直接报「无更新」
-  if (state.catalogHash === catalogHash && inv) {
+  // 2) hash 未变 -> 直接报「无更新」（除非本地 catalog.bin 缺失/太小，或被要求强制刷新）
+  const localCatalogSize = fs.existsSync(CATALOG_FILE) ? fs.statSync(CATALOG_FILE).size : 0;
+  const forceCatalog = process.argv.includes('--refresh-catalog');
+  if (state.catalogHash === catalogHash && inv && localCatalogSize > 1000 && !forceCatalog) {
     result.inventoryCount = (inv.names || []).length;
     log('[2/4] hash 未变，无需下载 catalog');
     writeJson(STATE, { ...state, lastCheck: result.checkedAt, errors: [] });
@@ -187,6 +191,14 @@ function parseCatalog(buf) {
     process.exit(2);
   }
   const names = parseCatalog(cat.buf);
+  try {
+    fs.writeFileSync(CATALOG_FILE + '.tmp', cat.buf);
+    fs.renameSync(CATALOG_FILE + '.tmp', CATALOG_FILE);
+    log(`[3/4] catalog 已落盘 ${CATALOG_FILE}（${(cat.size / 1048576).toFixed(1)}MB, ${CATALOG}）`);
+  } catch (e) {
+    result.errors.push('catalog 落盘失败: ' + e.message);
+    log('      catalog 落盘失败: ' + e.message);
+  }
   const old = new Set((inv && inv.names) || []);
   const isFirst = !inv;
   const added = isFirst ? [] : names.filter(n => !old.has(n));

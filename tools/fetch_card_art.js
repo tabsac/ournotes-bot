@@ -82,6 +82,7 @@ async function exportNamed(bundlePath, wantName, outPng) {
 }
 
 function toJpg(png, jpg, width) {
+  fs.mkdirSync(path.dirname(jpg), { recursive: true });     // ffmpeg 不会自己建目录
   const args = ['-hide_banner', '-loglevel', 'error', '-y', '-i', png];
   if (width) args.push('-vf', `scale=${width}:-2`);
   args.push('-q:v', '2', jpg);
@@ -103,6 +104,54 @@ async function one(id, force) {
     out[kind] = `${(fs.statSync(dest).size / 1024).toFixed(0)}KB${info.meta ? ' ' + info.meta.width + 'x' + info.meta.height : ''}`;
   }
   return out;
+}
+
+const readSongs = () => (readJson(path.join(ON, 'songs.json'), {}).songs || []);
+
+/** 曲绘：Image/Jacket/<jacket> → art/jacket/<jacket>.jpg（512x512） */
+async function jacketOne(jacket, force) {
+  const dest = path.join(ART, 'jacket', jacket + '.jpg');
+  if (!force && (exists(dest) || exists(path.join(ART, 'jacket', jacket + '.png')))) return 'skip';
+  const names = readJson(path.join(ON, 'bundle_inventory.json'), {}).names || [];
+  const pre = 'image_assets_image_jacket_' + jacket.toLowerCase() + '_';
+  const name = names.find((n) => n.startsWith(pre) && /^[0-9a-f]{32}\.bundle$/.test(n.slice(pre.length)));
+  if (!name) return 'no-bundle';
+  const local = path.join(DL, name);
+  let src = local;
+  if (!exists(src)) {
+    const songs = readJson(path.join(ON, 'songs.json'), {});
+    src = path.join(TMP, name);
+    fs.mkdirSync(TMP, { recursive: true });
+    execFileSync('curl', ['-s', '-m', '300', '-o', src, '-w', '%{http_code}', '-u', songs.auth, songs.cdn + '/' + name], { encoding: 'utf8' });
+  }
+  const png = path.join(TMP, jacket + '.png');
+  const info = await exportNamed(src, jacket, png);
+  toJpg(png, dest, 512);
+  try { fs.unlinkSync(png); } catch (e) {}
+  return `${(fs.statSync(dest).size / 1024).toFixed(0)}KB${info.meta ? ' ' + info.meta.width + 'x' + info.meta.height : ''}`;
+}
+
+/** 留影卡缩略图：SupportCard/<id>/snap_thumbnail → art/support/<id>.jpg */
+async function supportOne(id, force) {
+  const dest = path.join(ART, 'support', id + '.jpg');
+  if (!force && exists(dest)) return 'skip';
+  const names = readJson(path.join(ON, 'bundle_inventory.json'), {}).names || [];
+  const pre = `supportcard_assets_supportcard_${id}_snap_thumbnail_`;
+  const name = names.find((n) => n.startsWith(pre) && /^[0-9a-f]{32}\.bundle$/.test(n.slice(pre.length)));
+  if (!name) return 'no-bundle';
+  const local = path.join(DL, name);
+  let src = local;
+  if (!exists(src)) {
+    const songs = readJson(path.join(ON, 'songs.json'), {});
+    src = path.join(TMP, name);
+    fs.mkdirSync(TMP, { recursive: true });
+    execFileSync('curl', ['-s', '-m', '300', '-o', src, '-w', '%{http_code}', '-u', songs.auth, songs.cdn + '/' + name], { encoding: 'utf8' });
+  }
+  const png = path.join(TMP, 'sc' + id + '.png');
+  const info = await exportNamed(src, 'snap_thumbnail', png);
+  toJpg(png, dest, 512);
+  try { fs.unlinkSync(png); } catch (e) {}
+  return `${(fs.statSync(dest).size / 1024).toFixed(0)}KB${info.meta ? ' ' + info.meta.width + 'x' + info.meta.height : ''}`;
 }
 
 (async () => {
@@ -130,6 +179,24 @@ async function one(id, force) {
       missing++;
     }
   }
-  console.log(`\n卡面补齐完成：处理 ${fixed} 张，失败/仍缺 ${missing} 张（art 目录：thumb ${fs.readdirSync(path.join(ART, 'thumb')).length} 张，full ${fs.readdirSync(path.join(ART, 'full')).length} 张）`);
+  // 顺带：曲绘（新曲进来时 art/jacket 里会缺）+ 留影卡缩略图
+  let jack = 0, jackMiss = 0, sup = 0;
+  if (!dry) {
+    for (const sg of readSongs()) {
+      if (!sg.jacket) continue;
+      try {
+        const r = await jacketOne(sg.jacket, force);
+        if (r === 'skip') continue;
+        if (r === 'no-bundle') { jackMiss++; console.log(`✗ 曲绘 ${sg.jacket}（inventory 里没有包）`); }
+        else { jack++; console.log(`✓ 曲绘 ${sg.jacket} ${r}`); }
+      } catch (e) { jackMiss++; console.log(`✗ 曲绘 ${sg.jacket} ${e.message.slice(0, 100)}`); }
+    }
+    const supIds = (readJson(path.join(ON, 'master', 'MasterSupportCard.json'), {})._allData || []).map((x) => x._id);
+    for (const id of supIds) {
+      try { if (await supportOne(id, force) !== 'skip') sup++; } catch (e) { /* 缺包就跳过 */ }
+    }
+  }
+  console.log(`\n卡面补齐完成：卡 ${fixed} 张（失败 ${missing}），曲绘 ${jack} 张（缺 ${jackMiss}），留影卡缩略图 ${sup} 张`);
+  console.log(`art 目录：thumb ${fs.readdirSync(path.join(ART, 'thumb')).length} / full ${fs.readdirSync(path.join(ART, 'full')).length} / jacket ${fs.readdirSync(path.join(ART, 'jacket')).length} / support ${fs.existsSync(path.join(ART, 'support')) ? fs.readdirSync(path.join(ART, 'support')).length : 0}`);
   if (missing && !dry) process.exitCode = 1;
 })();

@@ -39,7 +39,7 @@ tools/
   build_songs2.py       songs.json 生成器
   build_index.py        index.json（角色 / 卡牌索引）生成器
   fetch_charts.js       把全部谱面抓到本地缓存
-  fetch_card_art.js     补齐卡面（master 的卡 → art/thumb|full/<id>.jpg），主数据更新后自动跑
+  fetch_card_art.js     补齐美术（卡面 thumb/full、曲绘 jacket、留影卡缩略图），主数据更新后自动跑
   build_score.py        按主数据表推算「单局理论分（效益）」与「效率」
   acb.js                UnityFS bundle → ACB（试听包 / 完整版分片两种布局）
   hca_dec.c             CRI HCA 解码器（直接驱动 clHCA，含 per-file 密钥推导）
@@ -60,6 +60,7 @@ data/on/
   effimg.py             效益 / 效率排行图
   gachainfo.py          当期卡池数据与文本一览（只算限定期间的）
   gachaimg.py           当期卡池一览图（封面 + 期间 + 概率 + Pick Up）
+  eventimg.py           当期活动一览图（主视觉 + 活动曲 + Pick Up + 加成 + 点数奖励）
   guessimg.py           猜卡用的卡面局部切片（随机剪一小块并放大）
   unitysrc/             UnityFS / 序列化文件 / 贴图解析（含 lz4hc、ASTC 解码）
 tests/                  假 NapCat 客户端，用来触发指令（需要有一个跑起来的宿主）
