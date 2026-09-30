@@ -247,18 +247,21 @@ def text_of(info):
     return '\n'.join(L)
 
 
-def gradient_mask(cover, band_h, color=(9, 11, 20)):
-    """封面下沿压一层「由浅入深」的遮罩：最上面 alpha=0，最下面 100% 纯色，中间线性渐变"""
-    w, h = cover.size
-    band_h = max(40, min(band_h, h))
+def gradient_mask(canvas, top_y, color=(9, 11, 20), ramp_frac=0.15):
+    """从 top_y 一直铺到画布最底下：最上面 ramp_frac（默认 15%）由 alpha 0 渐变到 255，
+    再往下整片 100% 纯色。信息（日期 / 活动道具 / 活动曲…）随后画在这层遮罩之上。"""
+    w, h = canvas.size
+    top_y = max(0, min(int(top_y), h - 1))
+    band_h = h - top_y
     band = Image.new('RGBA', (w, band_h), color + (0,))
     px = band.load()
+    ramp = max(1, int(band_h * ramp_frac))
     for y in range(band_h):
-        a = int(round(255 * (y / max(1, band_h - 1))))
+        a = 255 if y >= ramp else int(round(255 * y / ramp))
         for x in range(w):
             px[x, y] = (color[0], color[1], color[2], a)
-    cover.alpha_composite(band, (0, h - band_h))
-    return band_h
+    canvas.alpha_composite(band, (0, top_y))
+    return top_y
 
 
 def render(info, out_path, fonts, scale=1.0):
@@ -295,8 +298,9 @@ def render(info, out_path, fonts, scale=1.0):
     y = HEAD
     if top is not None:
         canvas.paste(top, (0, y), top)
-        # 由浅入深的遮罩（上 alpha=0 → 下 100% 纯色），信息压在遮罩上
-        gradient_mask(canvas, overlay_h + 24)
+        # 遮罩：从封面下部一直铺到整张图的最下面；最上 15% 由透明渐入，其余 100% 纯色。
+        # 下面所有内容（日期 / 活动道具 / 活动曲 / Pick Up / 加成 / 点数奖励）都画在它上面。
+        gradient_mask(canvas, y + top_h - overlay_h - 40)
         oy = y + top_h - overlay_h - 6
         dr.text((MARGIN, oy), '%s ~ %s' % (info['start'], info['end']), font=fonts.get(23, True), fill=(232, 238, 250))
         if info['item']:
