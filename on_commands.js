@@ -494,6 +494,36 @@ const { acbFromBundle, fullBundleFor } = require(path.join(__dirname, 'tools', '
  *   2. 完整版包里的 ACB 是分片 + 单字节异或的，见 acbFromBundle()。
  *   3. HCA 载荷用「基础密钥 × AFS2 subkey」推出的表替换，块尾 CRC16 覆盖的是密文。
  *      细节与实测见 tools/hca_dec.c。 */
+  /** 音频能用吗：ffprobe 看时长，太短/打不开就当半截文件删掉重做。
+   *  （踩过：转码被中断留下 256KB 的半截 mp3，缓存只看 size>4096 就认了，
+   *   结果 /on听曲 发出去的语音播不出来，用户看到的就是「获取不到」） */
+function audioOk(file, minSec) {
+  return new Promise((resolve) => {
+    if (!file || !fs.existsSync(file)) return resolve(false);
+    let size = 0;
+    try { size = fs.statSync(file).size; } catch (e) { return resolve(false); }
+    if (size < 8192) return resolve(false);
+    const c = spawn('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', file]);
+    let out = '';
+    c.stdout.on('data', (d) => { out += d.toString(); });
+    c.on('error', () => resolve(true));            // 没有 ffprobe 就别卡住，放行
+    c.on('close', () => {
+      const dur = Number(String(out).trim()) || 0;
+      // mp3 头里写着完整时长，光看 duration 抓不到「播到一半就断」的文件
+      // （实测：截断到 256KB 的 106 秒曲子，ffprobe 仍报 106.67s）。
+      // 我们统一用 libmp3lame 128k 转码，所以按 16KB/秒 估应有大小，明显偏小就是半截。
+      const expect = dur * 16000;
+      const short_ = dur < (minSec || 5);
+      const truncated = expect > 20000 && size < expect * 0.5;
+      if (!short_ && !truncated) return resolve(true);
+      console.log(`[on] 缓存音频不完整（${path.basename(file)} ${(size / 1024).toFixed(0)}KB `
+        + `${dur.toFixed(1)}s${truncated ? `，应有约 ${(expect / 1024).toFixed(0)}KB` : ''}）→ 删掉重做`);
+      try { fs.unlinkSync(file); } catch (e) {}
+      resolve(false);
+    });
+  });
+}
+
 async function ensureAudio(song, opts) {
   try { fs.mkdirSync(AUDIO_DIR, { recursive: true }); } catch (e) {}
   if (!song.acbBundle) throw new Error('这首曲子没有对应的音频包');
@@ -502,7 +532,7 @@ async function ensureAudio(song, opts) {
   const full = (opts && opts.short) ? null : fullBundleFor(song.acbBundle);
   const want = full || song.acbBundle;
   const mp3 = path.join(AUDIO_DIR, `${song.id}${full ? '' : '.short'}.mp3`);
-  if (fs.existsSync(mp3) && fs.statSync(mp3).size > 4096) return mp3;
+  if (fs.existsSync(mp3) && await audioOk(mp3, full ? 20 : 5)) return mp3;
 
   const bundle = path.join('/tmp', `onacb_${song.id}.bundle`);
   await curl(`${SONGS.cdn}/${withBundle(want)}`, bundle, SONGS.auth);
@@ -532,7 +562,11 @@ async function ensureAudio(song, opts) {
       '-codec:a', 'libmp3lame', '-b:a', '128k', mp3]);
     let log = '';
     c.stderr.on('data', (d) => { log += d.toString(); });
-    c.on('close', (code) => (code === 0 && fs.existsSync(mp3) ? res() : rej(new Error('转码失败: ' + log.slice(-120)))));
+    c.on('close', (code) => {
+      if (code === 0 && fs.existsSync(mp3)) return res();
+      try { fs.unlinkSync(mp3); } catch (e) {}          // 半截文件绝不留在缓存里
+      rej(new Error('转码失败: ' + log.slice(-120)));
+    });
   });
   [bundle, acb, wav].forEach((f) => { try { fs.unlinkSync(f); } catch (e) {} });
   return mp3;
@@ -958,7 +992,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
   async function ensureVoice(v, pack) {
     fs.mkdirSync(VOICE_DIR, { recursive: true });
     const mp3 = path.join(VOICE_DIR, v.soundId + '.mp3');
-    if (fs.existsSync(mp3) && fs.statSync(mp3).size > 2048) return mp3;
+    if (fs.existsSync(mp3) && await audioOk(mp3, 0.4)) return mp3;
     fs.mkdirSync(CRI_DIR, { recursive: true });
     const acb = path.join(CRI_DIR, v.sheetName + '.acb');
     if (!fs.existsSync(acb) || fs.statSync(acb).size < 10240) {
@@ -992,7 +1026,11 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
         '-codec:a', 'libmp3lame', '-b:a', '128k', mp3]);
       let log = '';
       c.stderr.on('data', (d) => { log += d.toString(); });
-      c.on('close', (code) => (code === 0 && fs.existsSync(mp3) ? res() : rej(new Error('转码失败: ' + log.slice(-120)))));
+      c.on('close', (code) => {
+        if (code === 0 && fs.existsSync(mp3)) return res();
+        try { fs.unlinkSync(mp3); } catch (e) {}
+        rej(new Error('转码失败: ' + log.slice(-120)));
+      });
     });
     try { fs.unlinkSync(wav); } catch (e) {}
     return mp3;
