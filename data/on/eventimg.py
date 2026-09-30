@@ -286,7 +286,7 @@ def render(info, out_path, fonts, scale=1.0):
     cell_w = (W - MARGIN * 2 - 18 * (SONG_COLS - 1)) // SONG_COLS
     jacket = min(cell_w - 24, 264)
     song_rows = max(1, (len(songs) + SONG_COLS - 1) // SONG_COLS) if songs else 0
-    song_block = (44 + song_rows * (58 + jacket + 42 + 16)) if songs else 0
+    song_block = (44 + song_rows * (63 + jacket + 42 + 16)) if songs else 0
     pick_h = 306 if picks else 0        # 卡面区 220 + 名字/角色两行（居中放置后标签统一在下方，留够高度）
     kinds = len({b['kind'] for b in bonus}) or 1
     bonus_h = 40 + (32 * kinds) + 30 * max(1, len(bonus)) + 10
@@ -309,7 +309,10 @@ def render(info, out_path, fonts, scale=1.0):
         canvas.paste(top, (0, y), top)
         # 遮罩：从封面下部一直铺到整张图的最下面；最上 15% 由透明渐入，其余 100% 纯色。
         # 下面所有内容（日期 / 活动道具 / 活动曲 / Pick Up / 加成 / 点数奖励）都画在它上面。
-        gradient_mask(canvas, y + top_h - overlay_h - 60)
+        # 反解遮罩起点：让「最上 15% 的渐入段」正好在封面底边结束 ——
+        # 这样封面上就能明显看到由浅入深，封面以下则全是不透明纯色（一直铺到图底）
+        mask_top = int((y + top_h - 0.15 * H) / 0.85)
+        gradient_mask(canvas, max(HEAD, mask_top))
         oy = y + top_h - overlay_h - 6
         dr.text((MARGIN, oy), '%s ~ %s' % (info['start'], info['end']), font=fonts.get(23, True), fill=(232, 238, 250))
         if info['item']:
@@ -322,9 +325,9 @@ def render(info, out_path, fonts, scale=1.0):
         for i, sg in enumerate(songs):
             r, col = divmod(i, SONG_COLS)
             x = MARGIN + col * (cell_w + 18)
-            cy = y + r * (58 + jacket + 42 + 16)
+            cy = y + r * (63 + jacket + 42 + 16)
             for k, line in enumerate(C.wrap(dr, sg['title'], fonts.get(23, True), cell_w, 2)):
-                dr.text((x + cell_w / 2, cy + k * 26), line, font=fonts.get(23, True), fill=(244, 247, 255), anchor='ma')
+                dr.text((x + cell_w / 2, cy + 5 + k * 26), line, font=fonts.get(23, True), fill=(244, 247, 255), anchor='ma')
             jk = None
             for ext in ('.jpg', '.png', '.jpeg'):
                 cand = os.path.join(ON, 'art', 'jacket', (sg.get('jacket') or '') + ext)
@@ -346,12 +349,12 @@ def render(info, out_path, fonts, scale=1.0):
                 dr.text((bx + bw / 2, cy + 58 + jacket + 8 + bh / 2), 'Lv.%s' % lv, font=bf,
                         fill=(255, 255, 255), anchor='mm')
                 bx += bw + gap
-        y += song_rows * (58 + jacket + 42 + 16)
+        y += song_rows * (63 + jacket + 42 + 16)
         y += 16
     y += 26
 
     if picks:
-        dr.text((MARGIN, y), 'Pick Up', font=fonts.get(24, True), fill=(255, 214, 120))
+        dr.text((MARGIN, y), '活动奖励', font=fonts.get(24, True), fill=GOLD)
         y += 40
         # 角色卡是竖版（162x216）、留影卡是横版（216x122），并排时按「竖直居中」对齐，
         # 名字那一行放在统一的基线上，不然一个顶格一个居中会很乱
