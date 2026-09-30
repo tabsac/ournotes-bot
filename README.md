@@ -39,7 +39,7 @@ tools/
   build_songs2.py       songs.json 生成器
   build_index.py        index.json（角色 / 卡牌索引）生成器
   fetch_charts.js       把全部谱面抓到本地缓存
-  fetch_card_art.js     补齐美术（卡面 thumb/full、曲绘 jacket、留影卡缩略图），主数据更新后自动跑
+  fetch_card_art.js     补齐美术（卡面 thumb/full、曲绘 jacket、留影缩略图与完整图），主数据更新后自动跑
   build_score.py        按主数据表推算「单局理论分（效益）」与「效率」
   acb.js                UnityFS bundle → ACB（试听包 / 完整版分片两种布局）
   hca_dec.c             CRI HCA 解码器（直接驱动 clHCA，含 per-file 密钥推导）
@@ -53,6 +53,7 @@ tools/
   grpc_probe.js         gRPC 免登录方法面探测
 data/on/
   cardimg.py            卡牌网格 / 单卡详情图
+  supportimg.py         留影卡网格 / 单张详情图
   songimg.py            曲目卡
   chart3.py             谱面预览（数据 / 绘制 / 统计）
   stampimg.py           贴纸图鉴

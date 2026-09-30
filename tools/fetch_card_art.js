@@ -72,10 +72,15 @@ async function exportNamed(bundlePath, wantName, outPng) {
     if (r && r.ext === '.png' && r.data) got.push({ cls: e.className, name: String(r.name || ''), meta: r.meta || {}, data: r.data });
   }
   if (!got.length) throw new Error('包里没有可导出的图片对象');
-  const exact = got.find((g) => g.name === wantName);
-  const partial = got.find((g) => g.name.indexOf(wantName) >= 0);
-  const ratio34 = got.find((g) => g.meta.width && Math.abs(g.meta.width / g.meta.height - 0.75) < 0.02);
-  const best = exact || partial || ratio34 || got.sort((a, c) => (c.meta.width || 0) * (c.meta.height || 0) - (a.meta.width || 0) * (a.meta.height || 0))[0];
+  // ⚠️ 必须优先 Sprite：Texture2D 是原始纹理（可能被翻转/带留白），
+  // 而且它和 Sprite 常常**同名**，按名字找会先撞上 Texture2D —— 63 号卡的缩略图就是这样被翻了个个儿
+  const sprites = got.filter((g) => g.cls === 'Sprite');
+  const exact = sprites.find((g) => g.name === wantName);
+  const partial = sprites.find((g) => g.name.indexOf(wantName) >= 0);
+  const ratio34 = sprites.find((g) => g.meta.width && Math.abs(g.meta.width / g.meta.height - 0.75) < 0.02);
+  const best = exact || partial || ratio34
+    || sprites.sort((a, c) => (c.meta.width || 0) * (c.meta.height || 0) - (a.meta.width || 0) * (a.meta.height || 0))[0]
+    || got[0];
   fs.mkdirSync(path.dirname(outPng), { recursive: true });
   fs.writeFileSync(outPng, best.data);
   return { name: best.name, meta: best.meta, alternatives: got.map((g) => `${g.name}:${g.meta.width}x${g.meta.height}`) };
@@ -154,6 +159,29 @@ async function supportOne(id, force) {
   return `${(fs.statSync(dest).size / 1024).toFixed(0)}KB${info.meta ? ' ' + info.meta.width + 'x' + info.meta.height : ''}`;
 }
 
+/** 留影卡完整图：SupportCard/<id>/snap_full → art/support_full/<id>.jpg（1920x1080 → 1280x720） */
+async function supportFullOne(id, force) {
+  const dest = path.join(ART, 'support_full', id + '.jpg');
+  if (!force && exists(dest)) return 'skip';
+  const names = readJson(path.join(ON, 'bundle_inventory.json'), {}).names || [];
+  const pre = `supportcard_assets_supportcard_${id}_snap_full_`;
+  const name = names.find((n) => n.startsWith(pre) && /^[0-9a-f]{32}\.bundle$/.test(n.slice(pre.length)));
+  if (!name) return 'no-bundle';
+  const local = path.join(DL, name);
+  let src = local;
+  if (!exists(src)) {
+    const songs = readJson(path.join(ON, 'songs.json'), {});
+    src = path.join(TMP, name);
+    fs.mkdirSync(TMP, { recursive: true });
+    execFileSync('curl', ['-s', '-m', '300', '-o', src, '-w', '%{http_code}', '-u', songs.auth, songs.cdn + '/' + name], { encoding: 'utf8' });
+  }
+  const png = path.join(TMP, 'sf' + id + '.png');
+  const info = await exportNamed(src, 'snap_full', png);
+  toJpg(png, dest, 1280);
+  try { fs.unlinkSync(png); } catch (e) {}
+  return `${(fs.statSync(dest).size / 1024).toFixed(0)}KB${info.meta ? ' ' + info.meta.width + 'x' + info.meta.height : ''}`;
+}
+
 (async () => {
   const idsArg = arg('ids', null);
   let ids;
@@ -193,10 +221,13 @@ async function supportOne(id, force) {
     }
     const supIds = (readJson(path.join(ON, 'master', 'MasterSupportCard.json'), {})._allData || []).map((x) => x._id);
     for (const id of supIds) {
-      try { if (await supportOne(id, force) !== 'skip') sup++; } catch (e) { /* 缺包就跳过 */ }
+      try {
+        if (await supportOne(id, force) !== 'skip') sup++;
+        await supportFullOne(id, force);
+      } catch (e) { /* 缺包就跳过 */ }
     }
   }
   console.log(`\n卡面补齐完成：卡 ${fixed} 张（失败 ${missing}），曲绘 ${jack} 张（缺 ${jackMiss}），留影卡缩略图 ${sup} 张`);
-  console.log(`art 目录：thumb ${fs.readdirSync(path.join(ART, 'thumb')).length} / full ${fs.readdirSync(path.join(ART, 'full')).length} / jacket ${fs.readdirSync(path.join(ART, 'jacket')).length} / support ${fs.existsSync(path.join(ART, 'support')) ? fs.readdirSync(path.join(ART, 'support')).length : 0}`);
+  console.log(`art 目录：thumb ${fs.readdirSync(path.join(ART, 'thumb')).length} / full ${fs.readdirSync(path.join(ART, 'full')).length} / jacket ${fs.readdirSync(path.join(ART, 'jacket')).length} / support ${fs.existsSync(path.join(ART, 'support')) ? fs.readdirSync(path.join(ART, 'support')).length : 0} / support_full ${fs.existsSync(path.join(ART, 'support_full')) ? fs.readdirSync(path.join(ART, 'support_full')).length : 0}`);
   if (missing && !dry) process.exitCode = 1;
 })();

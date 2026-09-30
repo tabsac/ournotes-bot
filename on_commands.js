@@ -5,6 +5,7 @@
  *  卡片
  *    /on查卡 <角色|团体|颜色> [星级]  卡片网格图（/oncard 同义）
  *    /on查卡 <数字ID>                单卡详情图
+ *    /on留影 [角色|数字ID]           留影卡一览 / 单张详情图
  *  曲目
  *    /on查曲 <曲名|别名>        曲目卡（封面/作曲作词编曲/MV/BPM/时长/四难度/别名）
  *    /on听曲 <曲名|别名>        歌曲语音（有完整版发完整版，否则发试听片段）
@@ -582,6 +583,8 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     '/on查卡 <角色> [星级]         该角色的卡片列表图',
     '/on查卡 <团体|颜色> [星级]    按团体 / 颜色筛卡',
     '/on查卡 <数字ID>              单卡详情图',
+    '/on留影 [角色]                留影卡缩略图一览（不给角色就发全部）',
+    '/on留影 <数字ID>              单张留影详情图（完整图 + 角色/属性/技能/日记）',
     '　星级 SSR / SR / R / BD / EX',
     '　团体 MyGO!!!!! / Ave Mujica / millsage / 一家Dumb Rock! / 梦限大MewType',
     '　颜色 红 / 蓝 / 绿 / 黄 / 紫',
@@ -632,6 +635,10 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
       '团体 MyGO!!!!! / Ave Mujica / millsage / 一家Dumb Rock! / 梦限大MewType',
       '颜色 红 / 蓝 / 绿 / 黄 / 紫',
       '例 /on查卡 灯　/on查卡 MyGO 蓝 SSR　/on查卡 12'],
+    '留影': ['/on留影（/onsupport、/on留影卡）',
+      '用法 /on留影 [角色]　/on留影 <数字ID>',
+      '留影卡（support card）：发缩略图一览；写角色名就只看该角色的；写数字 ID 就发单张详情图（完整图 + 角色 / 属性 / 三维上限 / 技能 / 日记）。',
+      '例 /on留影　/on留影 峰月律　/on留影 64'],
     '查曲': ['/on查曲（/onsong、/on曲）',
       '用法 /on查曲 <曲名|别名>',
       '发一张曲目卡：封面、作曲 / 作词 / 编曲、MV、发布时间、BPM、时长、主唱，以及四个难度的定数与物量。',
@@ -710,6 +717,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
   // /onhelp 的参数 → 上面的键（中英文名与常用简称都认）
   const HELP_ALIAS = {
     'card': '查卡', '查卡': '查卡', '卡片': '查卡',
+    'support': '留影', '留影': '留影', '留影卡': '留影',
     'song': '查曲', '曲': '查曲', '查曲': '查曲', '曲目': '查曲',
     'listen': '听曲', '听曲': '听曲', '听歌': '听曲',
     'voice': '角色语音', '语音': '角色语音', '听': '角色语音',
@@ -764,7 +772,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
    *  （踩过：新卡上线后 /on查卡 一直发旧图，因为 detail_61.png / grid_15.png 是缺图时生成的）。 */
   function artStamp() {
     let t = 0;
-    for (const d of ['thumb', 'full']) {
+    for (const d of ['thumb', 'full', 'support', 'support_full', 'jacket', 'event']) {
       try { t = Math.max(t, fs.statSync(path.join(ON_DIR, 'art', d)).mtimeMs); } catch (e) {}
     }
     return t;
@@ -843,6 +851,71 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     } catch (e) {
       console.error('[on] 网格失败:', errText(e));
       return replyText(ws, msg, '图片生成失败：' + errText(e));
+    }
+  }
+
+  // ---------------- 留影卡（/on留影）
+  const SUP_DIR = path.join(ON_DIR, 'art', 'support');
+  let SUPPORTS = null;
+  function supports() {
+    if (SUPPORTS) return SUPPORTS;
+    SUPPORTS = [];
+    try {
+      const chars = new Map(((readJson(path.join(ON_DIR, 'master', 'MasterCharacter.json'), {}) || {})._allData || []).map((c) => [c._id, c]));
+      const txt = new Map(((readJson(path.join(ON_DIR, 'master', 'MasterText.json'), {}) || {})._allData || []).map((r) => [String(r._id), r]));
+      const zh = (id) => { const r = txt.get(String(id)) || {}; return (r._simplifiedChinese || r._japanese || '').trim(); };
+      SUPPORTS = ((readJson(path.join(ON_DIR, 'master', 'MasterSupportCard.json'), {}) || {})._allData || []).map((c) => ({
+        id: c._id, title: zh(c._descriptionTextID), rarity: c._rarity, type: c._cardType,
+        chars: (c._characterIDs || []).map((i) => (chars.get(i) ? zh(chars.get(i)._nameTextID) : '')).filter(Boolean),
+      }));
+    } catch (e) { console.error('[on] 留影表读取失败:', errText(e)); }
+    return SUPPORTS;
+  }
+
+  async function handleSupport(ws, msg, arg) {
+    const raw = String(arg || '').trim();
+    if (!raw) {
+      // 不给条件就发全量一览（4 列，免得图太长）
+      const out = path.join(CACHE_DIR, 'supportgrid_all.png');
+      try {
+        const f = cacheFresh(out) ? out
+          : await runPy(['supportimg.py', 'grid', '--cols', '4', '--out', out], out);
+        return replyImage(ws, msg, f);
+      } catch (e) {
+        console.error('[on] 留影一览失败:', errText(e));
+        return replyText(ws, msg, '留影图生成失败：' + errText(e));
+      }
+    }
+    if (/^\d+$/.test(raw.replace(/\s+/g, ''))) {
+      const id = Number(raw.replace(/\s+/g, ''));
+      const out = path.join(CACHE_DIR, `support_${id}.png`);
+      try {
+        const f = cacheFresh(out) ? out : await runPy(['supportimg.py', 'detail', '--id', String(id), '--out', out], out);
+        return replyImage(ws, msg, f);
+      } catch (e) {
+        if (/没有 ID=/.test(errText(e))) {
+          const n = supports().length;
+          return replyText(ws, msg, `没有 ID=${id} 的留影卡（本版本共 ${n} 张：1–${n}）。`);
+        }
+        console.error('[on] 留影详情失败:', errText(e));
+        return replyText(ws, msg, '留影图生成失败：' + errText(e));
+      }
+    }
+    const ch = resolveCharacter(raw);
+    if (!ch) {
+      const names = INDEX ? INDEX.characters.map((c) => c.name).join('、') : '';
+      return replyText(ws, msg, `没有找到角色「${raw}」。可用角色：${names}`);
+    }
+    const key = `supportgrid_${ch.id}`;
+    const out = path.join(CACHE_DIR, key + '.png');
+    try {
+      const f = cacheFresh(out) ? out
+        : await runPy(['supportimg.py', 'grid', '--char', ch.name, '--out', out], out);
+      return replyImage(ws, msg, f);
+    } catch (e) {
+      if (/没有符合条件/.test(errText(e))) return replyText(ws, msg, `「${ch.name}」还没有留影卡。`);
+      console.error('[on] 留影网格失败:', errText(e));
+      return replyText(ws, msg, '留影图生成失败：' + errText(e));
     }
   }
 
@@ -1997,6 +2070,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     { re: /^\s*\/(?:结束|放弃)\s*([\s\S]*)$/i, run: (ws, msg) => handleEnd(ws, msg), shortOnly: true },
     { re: /^\s*\/on(?:charalias|角色别名)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleCharAlias(ws, msg, m[1] || '') },
     { re: /^\s*\/on(?:card|查卡)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleCard(ws, msg, m[1] || '') },
+    { re: /^\s*\/on(?:support|留影|留影卡)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleSupport(ws, msg, m[1] || '') },
     { re: /^\s*\/on(?:comic|小漫画|漫画)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleComic(ws, msg, m[1] || '') },
     { re: /^\s*\/on(?:rank|难度排行|排行)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleRank(ws, msg, m[1] || '') },
     { re: /^\s*\/on(?:benefit|效益排行|效益)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleEff(ws, msg, m[1] || '', 'benefit') },
@@ -2030,7 +2104,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     });
   }
 
-  console.log('Our Notes 指令已注册: /on查卡 /oncard /on查曲 /on听曲 /on听 /on谱面预览 /on查谱面 /on小漫画 /on卡池 /on活动 /on贴纸 /on难度排行 /on效益排行 /on效率排行 /on猜卡 /on猜曲 /on猜语音 /回答 /结束 /on添加别名 /on角色别名 /on待审核 /on通过 /on阻止 /on更新 /onhelp'
+  console.log('Our Notes 指令已注册: /on查卡 /oncard /on留影 /on查曲 /on听曲 /on听 /on谱面预览 /on查谱面 /on小漫画 /on卡池 /on活动 /on贴纸 /on难度排行 /on效益排行 /on效率排行 /on猜卡 /on猜曲 /on猜语音 /回答 /结束 /on添加别名 /on角色别名 /on待审核 /on通过 /on阻止 /on更新 /onhelp'
     + `（角色 ${INDEX ? INDEX.characters.length : 0} / 卡片 ${INDEX ? INDEX.cards.length : 0} / 曲目 ${SONGS ? SONGS.songs.length : 0}`
     + `，别名 ${Object.keys(ALIASES).length} 条，CRI密钥 ${process.env.ON_CRI_KEY ? '已配置' : '未配置'}）`);
 }

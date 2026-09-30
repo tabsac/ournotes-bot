@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 ON = os.environ.get('ON_DIR', '/home/admin/bot/data/on')
 sys.path.insert(0, ON)
@@ -159,10 +159,11 @@ def gather():
             picks.append({'kind': '卡', 'id': rid, 'name': tx(c['_subtitleTextID']),
                           'char': tx(ch['_nameTextID']) if ch else '', 'rarity': RARITY.get(c['_rarity'], '')})
         elif rt == 3 and rid in sups:
-            s = sups[rid]
-            names = '、'.join(tx(chars[i]['_nameTextID']) for i in (s.get('_characterIDs') or []) if i in chars)
-            picks.append({'kind': '留影', 'id': rid, 'name': tx(s['_nameTextID']), 'char': names,
-                          'rarity': RARITY.get(s.get('_rarity'), '')})
+            sc = sups[rid]
+            # 留影卡：名字取 _descriptionTextID（卡名，如「圆圆小憩」），_nameTextID 是角色/组合名（如「都子＆律」）
+            names = '、'.join(tx(chars[i]['_nameTextID']) for i in (sc.get('_characterIDs') or []) if i in chars)
+            picks.append({'kind': '留影', 'id': rid, 'name': tx(sc['_descriptionTextID']),
+                          'char': names, 'rarity': RARITY.get(sc.get('_rarity'), '')})
 
     # 点数奖励
     rewards = {r['_id']: r for r in load('MasterReward')}
@@ -182,15 +183,30 @@ def gather():
         if goods:
             miles.append({'pt': r.get('_eventPoint'), 'goods': '、'.join(goods)})
 
-    # 活动曲
-    song = None
+    # 活动曲：MasterChallengeMusic 里挂在这个活动下的曲子（可能不止一首），
+    # 列表为空时退回 MasterEvent._musicId
+    songs_by_id = {}
     try:
-        for s in json.load(open(os.path.join(ON, 'songs.json')))['songs']:
-            if str(s.get('id')) == str(ev.get('_musicId')):
-                song = s
-                break
+        for sg in json.load(open(os.path.join(ON, 'songs.json')))['songs']:
+            songs_by_id[str(sg.get('id'))] = sg
     except Exception:  # noqa: BLE001
         pass
+    music_ids = []
+    for r in load('MasterChallengeMusic'):
+        if r.get('_eventId') == ev['_id'] and r.get('_liveMusicId'):
+            if str(r['_liveMusicId']) not in music_ids:
+                music_ids.append(str(r['_liveMusicId']))
+    if not music_ids and ev.get('_musicId'):
+        music_ids = [str(ev['_musicId'])]
+    songs = []
+    for mid in music_ids:
+        sg = songs_by_id.get(mid)
+        if not sg:
+            continue
+        songs.append({'id': sg.get('id'), 'title': sg.get('title') or sg.get('title_jp'),
+                      'jacket': sg.get('jacket'),
+                      'charts': [(c.get('name'), c.get('level')) for c in (sg.get('charts') or []) if c]})
+    song = songs[0] if songs else None
 
     return {
         'id': ev['_id'],
@@ -203,9 +219,8 @@ def gather():
         'picks': picks,
         'miles': miles,
         'item': tx(items[ev['_eventItemId']]['_nameTextId']) if ev.get('_eventItemId') in items else '',
-        'song': ({'id': song.get('id'), 'title': song.get('title') or song.get('title_jp'),
-                  'jacket': song.get('jacket'),
-                  'charts': [(c.get('name'), c.get('level')) for c in (song.get('charts') or []) if c]} if song else None),
+        'song': song,
+        'songs': songs,
     }
 
 
@@ -213,9 +228,9 @@ def text_of(info):
     L = ['【%s】（%s ~ %s）' % (info['name'], info['start'], info['end'])]
     if info['left_sec'] is not None:
         L.append('剩余：%d 天 %d 小时' % (info['left_sec'] // 86400, info['left_sec'] % 86400 // 3600))
-    if info['song']:
-        lv = '　'.join('%s %s' % (n, l) for n, l in info['song']['charts'])
-        L.append('活动曲：%s（%s）' % (info['song']['title'], lv))
+    for i, sg in enumerate(info.get('songs') or []):
+        lv = '　'.join('%s %s' % (n, l) for n, l in sg['charts'])
+        L.append('%s：%s（%s）' % ('活动曲' if len(info['songs']) == 1 else '活动曲%d' % (i + 1), sg['title'], lv))
     if info['picks']:
         L.append('Pick Up：' + '、'.join('%s %s（%s）' % (p['rarity'], p['name'], p['char']) for p in info['picks']))
     for kind in ('成员卡', '留影卡'):
@@ -227,23 +242,43 @@ def text_of(info):
     return '\n'.join(L)
 
 
+def acrylic(cover, top_frac, alpha=175, blur=16):
+    """把封面下沿做成「深色亚克力」：高斯模糊 + 压暗 + 自上而下渐隐的遮罩"""
+    w, h = cover.size
+    band_h = max(80, int(h * (1 - top_frac)))
+    band = cover.crop((0, h - band_h, w, h)).convert('RGB')
+    band = band.filter(ImageFilter.GaussianBlur(blur))
+    dark = Image.new('RGB', band.size, (10, 12, 20))
+    band = Image.blend(band, dark, 0.62)
+    mask = Image.new('L', band.size, 0)
+    mp = mask.load()
+    for y in range(band_h):
+        mp_row = int(alpha * min(1.0, (y / max(1, band_h * 0.45))))
+        for x in range(w):
+            mp[x, y] = mp_row
+    cover.paste(band, (0, h - band_h), mask)
+    return band_h
+
+
 def render(info, out_path, fonts, scale=1.0):
     picks = info['picks']
     bonus = info['bonus']
     miles = info['miles'][:9]
+    songs = info.get('songs') or []
     top = event_asset(info['top'], 'top_' + str(info['id'])) or event_asset(info['logo'], 'logo_' + str(info['id']))
     HEAD = 112
+    # 封面铺满整幅宽度
     top_h = 0
     if top is not None:
-        tw = min(W - MARGIN * 2 - 120, 760)
-        top_h = round(top.height * tw / top.width)
-        top = top.resize((tw, top_h), Image.LANCZOS)
-    song_h = 232 if info['song'] else 0
-    pick_h = 268 if picks else 0
+        top_h = round(top.height * W / top.width)
+        top = top.resize((W, top_h), Image.LANCZOS).convert('RGBA')
+    song_rows = max(1, len(songs))
+    overlay_h = 52 + 30 + song_rows * 34            # 期间/道具一行 + 活动曲若干行
+    pick_h = 306 if picks else 0        # 卡面区 220 + 名字/角色两行（居中放置后标签统一在下方，留够高度）
     kinds = len({b['kind'] for b in bonus}) or 1
     bonus_h = 40 + (32 * kinds) + 30 * max(1, len(bonus)) + 10
     mile_h = 40 + 30 * ((len(miles) + 2) // 3)
-    H = HEAD + 20 + (top_h + 24 if top_h else 0) + 62 + song_h + pick_h + bonus_h + mile_h + 90
+    H = HEAD + (top_h if top_h else 0) + 26 + pick_h + bonus_h + mile_h + 90
 
     canvas = C.vertical_gradient(W, H, (26, 30, 48), (14, 16, 26)).convert('RGBA')
     dr = ImageDraw.Draw(canvas)
@@ -256,54 +291,54 @@ def render(info, out_path, fonts, scale=1.0):
         d, h = info['left_sec'] // 86400, info['left_sec'] % 86400 // 3600
         dr.text((W - MARGIN, 72), '剩余 %d 天 %d 小时' % (d, h), font=fonts.get(20, False), fill=(150, 162, 186), anchor='ra')
 
-    y = HEAD + 20
+    y = HEAD
     if top is not None:
-        canvas.paste(top, ((W - top.width) // 2, y), top)
-        y += top_h + 18
-    dr.text((MARGIN, y), '%s ~ %s' % (info['start'], info['end']), font=fonts.get(22, False), fill=(160, 172, 196))
-    if info['item']:
-        dr.text((W - MARGIN, y), '活动道具：' + info['item'], font=fonts.get(22, True), fill=(180, 210, 255), anchor='ra')
-    y += 62
-
-    if info['song']:
-        jk = None
-        for ext in ('.jpg', '.png', '.jpeg'):
-            cand = os.path.join(ON, 'art', 'jacket', (info['song']['jacket'] or '') + ext)
-            if os.path.exists(cand):
-                jk = cand
-                break
-        if jk:
-            art = C.rounded(Image.open(jk).convert('RGB').resize((200, 200), Image.LANCZOS), 12)
-            canvas.paste(art, (MARGIN + 6, y), art)
-        dr.text((MARGIN + 226, y + 6), '活动曲', font=fonts.get(22, True), fill=(150, 196, 250))
-        dr.text((MARGIN + 226, y + 40), info['song']['title'], font=fonts.get(34, True), fill=(248, 250, 255))
-        x = MARGIN + 226
-        for name, lv in info['song']['charts']:
-            seg = '%s %s' % (name, lv)
-            dr.text((x, y + 96), seg, font=fonts.get(22, True), fill=(224, 230, 244))
-            x += dr.textlength(seg, font=fonts.get(22, True)) + 26
-        y += song_h
+        canvas.paste(top, (0, y), top)
+        # 亚克力遮罩 + 把日期/道具/活动曲压在遮罩上
+        acrylic(canvas.crop((0, y, W, y + top_h)), 0.0, alpha=190, blur=18) if False else None
+        band = Image.new('RGBA', (W, top_h), (0, 0, 0, 0))
+        band.paste(top, (0, 0))
+        acrylic(band, max(0.0, 1 - (overlay_h + 30) / top_h), alpha=200, blur=18)
+        canvas.paste(band, (0, y), band)
+        oy = y + top_h - overlay_h - 6
+        dr.line([MARGIN, oy - 12, W - MARGIN, oy - 12], fill=(255, 255, 255, 60), width=1)
+        dr.text((MARGIN, oy), '%s ~ %s' % (info['start'], info['end']), font=fonts.get(23, True), fill=(232, 238, 250))
+        if info['item']:
+            dr.text((W - MARGIN, oy), '活动道具：' + info['item'], font=fonts.get(23, True), fill=(190, 216, 255), anchor='ra')
+        oy += 32
+        for i, sg in enumerate(songs):
+            label = '活动曲' if len(songs) == 1 else '活动曲%d' % (i + 1)
+            dr.text((MARGIN, oy), label, font=fonts.get(21, True), fill=(255, 214, 120))
+            dr.text((MARGIN + 108, oy), sg['title'], font=fonts.get(23, True), fill=(248, 250, 255))
+            lv = '　'.join('%s %s' % (n, l) for n, l in sg['charts'])
+            dr.text((MARGIN + 108 + dr.textlength(sg['title'], font=fonts.get(23, True)) + 24, oy + 2),
+                    lv, font=fonts.get(19, False), fill=(206, 216, 236))
+            oy += 34
+        y += top_h
+    y += 26
 
     if picks:
         dr.text((MARGIN, y), 'Pick Up', font=fonts.get(24, True), fill=(255, 214, 120))
         y += 40
+        # 角色卡是竖版（162x216）、留影卡是横版（216x122），并排时按「竖直居中」对齐，
+        # 名字那一行放在统一的基线上，不然一个顶格一个居中会很乱
+        area_h = 220          # 卡面区域高度（按最高的竖版卡算）
+        label_y = y + area_h + 8
         x = MARGIN + 6
         for p in picks:
             art = None
             if p['kind'] == '卡':
                 f = C.find_art('thumb', p['id'])
                 if f:
-                    art = Image.open(f).convert('RGB')
-                    art = C.rounded(art.resize((162, 216), Image.LANCZOS), 10)
+                    art = C.rounded(Image.open(f).convert('RGB').resize((162, 216), Image.LANCZOS), 10)
             else:
                 f = os.path.join(ON, 'art', 'support', str(p['id']) + '.jpg')
                 if os.path.exists(f):
                     art = C.rounded(Image.open(f).convert('RGB').resize((216, 122), Image.LANCZOS), 10)
             if art is not None:
-                canvas.paste(art, (x, y), art)
-            ty = y + (220 if p['kind'] == '卡' else 130)
-            dr.text((x, ty), '%s %s' % (p['rarity'], p['name']), font=fonts.get(20, True), fill=(240, 244, 252))
-            dr.text((x, ty + 26), p['char'], font=fonts.get(18, False), fill=(152, 164, 188))
+                canvas.paste(art, (x, y + (area_h - art.height) // 2), art)      # 中心对齐
+            dr.text((x, label_y), '%s %s' % (p['rarity'], p['name']), font=fonts.get(20, True), fill=(240, 244, 252))
+            dr.text((x, label_y + 26), p['char'], font=fonts.get(18, False), fill=(152, 164, 188))
             x += 236
         y += pick_h
 
