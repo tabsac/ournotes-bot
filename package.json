@@ -4,11 +4,16 @@
   "description": "BanG Dream! Our Notes 的 QQ 机器人指令模块（OneBot v11）",
   "main": "on_commands.js",
   "scripts": {
-    "test": "echo \"先跑起宿主 OneBot 应用，再执行 tests/ 下的脚本\" && exit 1"
+    "test": "node tests/test_command_scope.cjs"
   },
-  "keywords": ["onebot", "qq-bot", "bang-dream"],
+  "keywords": [
+    "onebot",
+    "qq-bot",
+    "bang-dream"
+  ],
   "license": "MIT",
   "dependencies": {
+    "@napi-rs/canvas": "1.0.10",
     "ws": "^8.21.3"
   }
 }

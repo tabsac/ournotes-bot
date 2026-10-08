@@ -15,7 +15,8 @@
  *    /on小漫画 [角色]           随机一张加载漫画
  *    /on卡池                    当期招募一览图（封面 + 期间 + 概率 + Pick Up）
  *    /on活动                    当期活动一览图（主视觉 + 活动曲 + Pick Up + 加成 + 点数奖励）
- *    /on贴纸 [角色]             贴纸图鉴
+ *    /on表情 [角色|ID]          表情图鉴 / 原图
+ *    /on贴纸 [角色|ID]          贴纸收藏 / 原图
  *    /on难度排行 [难度] [整数]   难度排行图
  *    /on效益排行 [难度] [整数]   效益排行（单局理论最高分）
  *    /on效率排行 [难度] [整数]   效率排行（效益 ÷ 时长）
@@ -48,19 +49,18 @@ const AUDIO_DIR = path.join(ON_DIR, 'audio');
 const ALIAS_FILE = path.join(ON_DIR, 'aliases.json');
 const CHAR_ALIAS_FILE = path.join(ON_DIR, 'char_aliases.json');   // 角色别名（/on角色别名）
 const SCORE_FILE = path.join(ON_DIR, 'game_score.json');          // 小游戏战绩：QQ → 答对次数
-const ADMIN = String(process.env.ON_ADMIN || require(path.join(__dirname, 'lib', 'secrets.js')).get('admin') || '');
+const ADMIN = String(process.env.ON_ADMIN || '3936267550');
 const RENDER_TIMEOUT_MS = 90 * 1000;
 const withBundle = (n) => (String(n || '').endsWith('.bundle') ? String(n) : String(n || '') + '.bundle');
 
 // ---- CDN 包解密：UnityFS 明文直接用；否则按 unity-node 的方案解密
-//   key/seed 见 secrets.json（ON_BUNDLE_KEY / ON_BUNDLE_SEED）
+//   key=7372a4ee777db361ad896c99e408a182 seed=ee24a70238e2a0e5
 //   nonce = SHA256(seed || utf8(bundleName))[0:8]
 //   计数块 = nonce(8) || BE64(blockIndex)，AES-128-ECB 生成 keystream
 //   只异或前 min(size,16384) 字节，尾部原样保留
 const crypto = require('crypto');
-const { need } = require(path.join(__dirname, 'lib', 'secrets.js'));
-const BUNDLE_KEY = Buffer.from(need('bundleKey', 'ON_BUNDLE_KEY', 'UnityFS 资源包 AES-128 密钥'), 'hex');
-const BUNDLE_SEED = Buffer.from(need('bundleSeed', 'ON_BUNDLE_SEED', 'bundle nonce seed'), 'hex');
+const BUNDLE_KEY = Buffer.from('7372a4ee777db361ad896c99e408a182', 'hex');
+const BUNDLE_SEED = Buffer.from('ee24a70238e2a0e5', 'hex');
 const INNER_MAGIC = 'UnityFS\0';
 
 function maybeDecrypt(buf, name) {
@@ -601,8 +601,17 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     '【图鉴・排行】',
     '/on小漫画 [角色]              随机一张加载漫画（不给角色就随机）',
     '/on卡池                       当期招募一览图（封面・概率・Pick Up）',
+    '/on歌榜组卡 [skip]            为所有活动歌曲分别推荐队伍',
+    '/on活动组卡 [skip]            推荐刷 CP、PT、徽章的歌曲和队伍（同图）',
+    '/on激奏组卡 [平均|歌曲] [skip] 激奏跨曲参考或指定歌曲',
+    '/on自由组卡 [平均|歌曲] [skip] 自由模式跨曲平均或指定歌曲',
+    '/on日常组卡 [skip]            日常收益最强的选歌和队伍（清火组卡同义）',
+    '　指定歌曲：服务器计算并发图；其他组卡：返回网页勾选计算。',
+    '　例 /on自由组卡 春日影　/on激奏组卡 春日影 skip',
+    '　云端保存并复用，计算完成后自动发图：https://on.tabsac.com/#plan',
     '/on活动                       当期活动一览图（活动曲・加成・点数奖励）',
-    '/on贴纸 [角色]                贴纸图，不给角色就发全部',
+    '/on表情 [角色|ID|页2]        表情图鉴 / 原图',
+    '/on贴纸 [角色|ID|页2]        贴纸收藏 / 原图',
     '/on难度排行 [难度] [整数]      难度排行图',
     '　例 /on难度排行 25（EXPERT 25.0~25.9）　/on难度排行 ex 25　/on难度排行 hd',
     '/on效益排行 [难度] [整数]      效益排行（单局理论最高分，针对查曲）',
@@ -616,7 +625,12 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     '/结束                         放弃这一局并公布答案',
     '　猜答案不用一字不差，写别名或很接近的写法都算对。',
     '　一局 1 分钟（谜面发完开始计时，到点自动公布答案）；一个会话同时只能开一局。',
-    '　猜错会告诉你「猜错了，不是X」，名字写偏了会给「你要猜的是不是：…(80%)」这样的候选。',
+    '　答错时显示提示；名称相近时会列出候选答案。',
+    '',
+    '【成绩与账号】',
+    '/onb25                        查看已保存的 B25 成绩图片',
+    '/on绑定网页 <6 位码>          绑定网页账号与当前 QQ',
+    '网页版：https://on.tabsac.com/',
     '',
     '【其它】',
     '/on添加别名 <原名> <别名>      给曲子登记别名',
@@ -628,6 +642,13 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
 
   // 单条指令的详细用法（/onhelp <指令>）
   const HELP_DETAIL = {
+    '活动组卡': ['用法：/on活动组卡 [skip]', '分别推荐刷 CP、活动 PT、徽章的歌曲和队伍，合为一张图。默认非 Skip（AP参考），可加 skip。', '此指令返回网页链接；勾选活动收益及 Skip / 非 Skip 后计算，结果可在网页下载。https://on.tabsac.com/#plan'],
+    '歌榜组卡': ['用法：/on歌榜组卡 [skip]', '对当前活动的所有歌曲分别推荐最高分队伍。默认非 Skip；加 skip 比较跳过分。此指令返回网页链接，请勾选活动歌榜后计算。'],
+    '激奏组卡': ['用法：/on激奏组卡 [平均|曲名] [skip]', '不填歌曲或填平均：返回网页链接；指定歌曲：服务器计算并发送该曲队伍。', '例：/on激奏组卡 春日影　/on激奏组卡 平均', '当前采用单人任务模型与区间首位假设，仅为激奏参考，不能预测多人连胜。Skip只比较跳过分，不触发激奏任务。'],
+    '自由组卡': ['用法：/on自由组卡 [平均|曲名] [skip]', '不填歌曲或填平均：返回网页链接，勾选自由组卡；指定歌曲：服务器计算并发送该曲队伍。', '例：/on自由组卡 春日影　/on自由组卡 平均 skip'],
+    '日常组卡': ['用法：/on日常组卡 [skip]，或 /on清火组卡 [skip]', '两条指令同义，返回网页链接，勾选日常 / 清火组卡计算每 Boost 收益更高的歌曲及队伍，同时列出 CP、PT、徽章目标。默认非 Skip，可添加 skip。'],
+    '组卡': ['网页：https://on.tabsac.com/#plan', '指令：/on歌榜组卡、/on活动组卡、/on激奏组卡、/on自由组卡、/on日常组卡（或/on清火组卡）。', '均可添加 skip，只有激奏与自由支持歌曲名称或平均。默认非 Skip、最高可用难度、4 Boost。', '网页导入并同步卡库：https://on.tabsac.com/#account；绑定 QQ：https://on.tabsac.com/#cloud', '仅指定歌曲由机器人提交服务器计算并发图；其他指令返回网页链接，勾选后发起计算并保存。更多目标会变慢。激奏目前为单人任务模型参考，尚不代表多人连胜。'],
+    'B25': ['用法：/onb25', '查看保存在云端的 B25 成绩图片。', '导入账号包：https://on.tabsac.com/#account', '保存成绩：https://on.tabsac.com/#b25', '绑定 QQ：https://on.tabsac.com/#cloud'],
     '查卡': ['/on查卡（/oncard）',
       '用法 /on查卡 <角色> [星级]　/on查卡 <团体|颜色> [星级]　/on查卡 <数字ID>',
       '按角色或按团体 / 颜色发卡片列表图；给数字 ID 就发单卡详情图。',
@@ -665,10 +686,8 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     '卡池': ['/on卡池（/ongacha、/on招募）',
       '用法 /on卡池',
       '当前正在开的招募，画成一张图：卡池封面、活动期间、各星级概率、Pick Up 卡片。'],
-    '贴纸': ['/on贴纸（/onstamp）',
-      '用法 /on贴纸 [角色]',
-      '该角色的贴纸图鉴；不给角色就发全部角色的。',
-      '例 /on贴纸 灯　/on贴纸'],
+    '表情': ['用法：/on表情 [角色|ID|页2]（/onstamp、/onemote）', '查看表情图鉴；ID 查看游戏透明原图。', '例：/on表情 灯　/on表情 1　/on表情 页2', '当前素材没有独立文字层，暂不支持替换周围文字。'],
+    '贴纸': ['用法：/on贴纸 [角色|ID|页2]（/onsticker）', '一张图展示全部贴纸；预览放大裁切，ID 查看完整原图。传包后按已有 / 未拥有展示，有公开资料时显示玩家信息。', '例：/on贴纸　/on贴纸 1　/on贴纸 页2', '传包：https://on.tabsac.com/#account　绑定 QQ：https://on.tabsac.com/#cloud'],
     '难度排行': ['/on难度排行（/onrank、/on排行）',
       '用法 /on难度排行 [难度] [整数]',
       '难度 ex / hd / nor / ez（默认 ex）；写了整数就只列这一段，如 25 → 25.0~25.9。',
@@ -716,6 +735,10 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
 
   // /onhelp 的参数 → 上面的键（中英文名与常用简称都认）
   const HELP_ALIAS = {
+    '歌榜组卡': '歌榜组卡', '激奏组卡': '激奏组卡', '自由组卡': '自由组卡', '日常组卡': '日常组卡', '清火组卡': '日常组卡',
+    '组卡': '组卡', '配队': '组卡', '多目标组卡': '组卡',
+    '活动组卡': '活动组卡',
+    'b25': 'B25', 'b25成绩': 'B25', '成绩卡': 'B25',
     'card': '查卡', '查卡': '查卡', '卡片': '查卡',
     'support': '留影', '留影': '留影', '留影卡': '留影',
     'song': '查曲', '曲': '查曲', '查曲': '查曲', '曲目': '查曲',
@@ -726,7 +749,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     'comic': '小漫画', '小漫画': '小漫画', '漫画': '小漫画',
     'gacha': '卡池', '卡池': '卡池', '招募': '卡池',
     'event': '活动', '活动': '活动', '活动一览': '活动',
-    'stamp': '贴纸', '贴纸': '贴纸',
+    'stamp': '表情', 'emote': '表情', '表情': '表情', 'sticker': '贴纸', '贴纸': '贴纸',
     'rank': '难度排行', '难度排行': '难度排行', '排行': '难度排行',
     'benefit': '效益排行', '效益排行': '效益排行', '效益': '效益排行',
     'eff': '效率排行', 'efficiency': '效率排行', '效率排行': '效率排行', '效率': '效率排行',
@@ -1306,22 +1329,55 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     }
   }
 
-  // ---------------- 贴纸
-  async function handleStamp(ws, msg, arg) {
-    const q = String(arg || '').trim();
-    const out = path.join(CACHE_DIR, 'stamp_' + (q ? norm(q).slice(0, 24) : 'all') + '.png');
+  // ---------------- 表情与收藏贴纸
+  let collectibleQueue = Promise.resolve(), collectiblePending = 0;
+  function renderCollectible(args, out) {
+    if (collectiblePending >= 3) return Promise.reject(new Error('图鉴请求较多，请稍后重试。'));
+    collectiblePending += 1;
+    const job = collectibleQueue.then(() => runPy(args, out));
+    collectibleQueue = job.catch(() => {});
+    return job.finally(() => { collectiblePending -= 1; });
+  }
+  async function handleCollectible(ws, msg, arg, kind) {
+    const label = kind === 'emote' ? '表情' : '贴纸';
+    let q = String(arg || '').trim();
+    const single = q.match(/^(\d+)(?:\s+([\s\S]+))?$/);
+    if (single && single[2]) return replyText(ws, msg, kind === 'emote'
+      ? '当前表情的角色和文字已合成在同一张图片里，暂不能直接替换周围文字。发送 /on表情 ' + single[1] + ' 可查看原图。'
+      : '查看贴纸原图请使用 /on贴纸 ID，例如 /on贴纸 ' + single[1]);
+    let page = 1;
+    const pageMatch = q.match(/(?:^|\s)(?:页|第)(\d+)(?:页)?$/);
+    if (pageMatch) {page = Number(pageMatch[1]); q = q.slice(0, pageMatch.index).trim();}
+    const dir = path.join(ON_DIR, 'tmp'); fs.mkdirSync(dir, {recursive:true});
+    const stamp = 'collectible-' + Date.now() + '-' + crypto.randomBytes(8).toString('hex');
+    const out = path.join(dir, stamp + (kind === 'degree' && !single ? '.jpg' : '.png')), input = path.join(dir, stamp + '.json');
     try {
-      const f = fs.existsSync(out) ? out
-        : await runPy(['stampimg.py'].concat(q ? ['--char', q] : []).concat(['--out', out]), out);
-      return replyImage(ws, msg, f);
-    } catch (e) {
-      if (/没有找到角色/.test(errText(e))) {
-        const names = INDEX ? INDEX.characters.map((c) => c.name).join('、') : '';
-        return replyText(ws, msg, `没有找到角色「${q}」。可用角色：${names}`);
+      const args = ['collectibleimg.py', '--kind', kind, '--page', String(page), '--out', out];
+      if (kind === 'degree' && !pageMatch) args.push('--all');
+      if (single) args.push('--id', single[1]);
+      else if (q) args.push('--char', q);
+      if (kind === 'degree' && !single) {
+        const qq = String(msg.sender && msg.sender.user_id || '');
+        let data;
+        try { data = await onApiUserData(qq, true); }
+        catch { data = null; }
+        const profiles = ((data && data.results) || []).filter(r => r.kind === 'profile' && r.payload && r.payload.document && r.payload.document.account_import);
+        profiles.sort((a,b) => Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0));
+        const document = profiles[0] && profiles[0].payload.document;
+        const importedId = document && document.account_import && document.account_import.account_id;
+        const player = await onPublicPlayer(qq, data, importedId);
+        fs.writeFileSync(input, JSON.stringify({uploaded:!!document, player, collection:document && document.profile && document.profile.inventory && document.profile.inventory.stickers || {known:false,counts:[]}}), {mode:0o600});
+        args.push('--ownership', input);
       }
-      console.error('[on] 贴纸失败:', errText(e));
-      return replyText(ws, msg, '贴纸图生成失败：' + errText(e));
-    }
+      await renderCollectible(args, out);
+      // Embed bytes before cleanup: OneBot reads file:// paths asynchronously.
+      const image = fs.readFileSync(out).toString('base64');
+      const t = target(msg);
+      sendReply(ws, t.action, Object.assign({}, t.base, {
+        message: [{type: 'image', data: {file: 'base64://' + image}}],
+      }));
+    } catch(e) { return replyText(ws,msg,label + '：' + errText(e)); }
+    finally { for (const file of [out,input]) {try {fs.unlinkSync(file);} catch {}} }
   }
 
   // ---------------- 卡池
@@ -2022,7 +2078,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
         const extra = prep.type === 'song' ? '（猜曲要下完整版，可能要十几秒）' : '';
         return replyText(ws, msg, `「${GAME_KIND[prep.type]}」的谜面还在准备中${extra}，等它发出来再答。`);
       }
-      return replyText(ws, msg, '现在没有进行中的游戏。发 /on猜卡、/on猜曲 或 /on猜语音 开一局。');
+      return replyText(ws, msg, '现在没有进行中的游戏。发 /on猜卡、/on猜曲、/on猜语音 开一局。');
     }
     if (!guess) return replyText(ws, msg, '用法：/回答 <你猜的名字>（/答、/猜 同义）');
     const hit = guessHit(guess, r.answer.accept);
@@ -2061,6 +2117,574 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     return revealRound(ws, msg, r, '这局结束了，');
   }
 
+  // ================= Our Notes 玩家名片（好友接口公开资料）=================
+  //  数据来自 /app.friend.FriendService/FindByProfileID（按「资料ID」查任何人）
+  //  只读：我们自己不发任何写操作；绑定只是把「QQ → 资料ID」记下来
+  const ON_PLAYER_BRIDGE = path.join(__dirname, 'tools', 'on_player.js');
+  const ON_BINDS_FILE = path.join(ON_DIR, 'player_binds.json');
+  const ON_PLAYER_CACHE = path.join(ON_DIR, 'cache', 'player');
+  const ON_RANK_TABLE = (function () {
+    try {
+      const rows = (readJson(path.join(ON_DIR, 'master', 'MasterPlayerRank.json'), {}) || {})._allData || [];
+      return rows.slice().sort(function (a, b) { return (a._rank || 0) - (b._rank || 0); });
+    } catch (e) { return []; }
+  })();
+
+  function onBridge(args, timeoutMs) {
+    return new Promise(function (resolve, reject) {
+      const child = spawn('node', [ON_PLAYER_BRIDGE].concat(args), { cwd: __dirname });
+      let out = '', err = '', done = false;
+      const timer = setTimeout(function () {
+        if (!done) { try { child.kill('SIGKILL'); } catch (e) {} reject(new Error('查询超时')); }
+      }, timeoutMs || 45000);
+      child.stdout.on('data', function (d) { out += d.toString(); });
+      child.stderr.on('data', function (d) { err += d.toString(); });
+      child.on('error', function (e) { done = true; clearTimeout(timer); reject(e); });
+      child.on('close', function () {
+        done = true; clearTimeout(timer);
+        const text = out.trim();
+        try { resolve(JSON.parse(text)); }
+        catch (e) { reject(new Error((err || out || '没有输出').trim().slice(0, 200))); }
+      });
+    });
+  }
+
+  function onBindsRead() {
+    const raw = readJson(ON_BINDS_FILE, {}) || {};
+    const out = {};
+    Object.keys(raw).forEach(function (k) {
+      const v = raw[k];
+      if (v && Array.isArray(v.list)) out[k] = { list: v.list.filter(function (x) { return x && x.id; }) };
+    });
+    return out;
+  }
+  function onBindsWrite(o) {
+    try { fs.mkdirSync(path.dirname(ON_BINDS_FILE), { recursive: true }); } catch (e) {}
+    fs.writeFileSync(ON_BINDS_FILE, JSON.stringify(o, null, 1));
+  }
+  function onMyList(qq) { const b = onBindsRead(); return (b[qq] && b[qq].list) || []; }
+  function onSaveList(qq, list) {
+    const b = onBindsRead();
+    if (list && list.length) b[qq] = { list: list }; else delete b[qq];
+    onBindsWrite(b);
+  }
+  function onSlot(arg, len) {
+    const m = /^[uU]?(\d{1,2})$/.exec(String(arg || '').trim());
+    if (!m) return null;
+    const n = Number(m[1]);
+    if (!n || n > len) return null;
+    return n - 1;
+  }
+  function onRankOf(exp) {
+    if (!ON_RANK_TABLE.length) return { rank: 0 };
+    let cur = ON_RANK_TABLE[0], next = null;
+    for (let i = 0; i < ON_RANK_TABLE.length; i++) {
+      if ((ON_RANK_TABLE[i]._exp || 0) <= exp) { cur = ON_RANK_TABLE[i]; next = ON_RANK_TABLE[i + 1] || null; }
+      else break;
+    }
+    return { rank: cur._rank, friendMax: cur._friendMax, nextExp: next ? next._exp : null };
+  }
+  function onFmtTime(ts) {
+    const n = Number(ts || 0);
+    if (!n) return '';
+    const d = new Date(n * 1000);
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')
+      + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  }
+  /** 把 protocol 返回的 profile 变成渲染载荷 + 要下载的图片 URL */
+  function onProfilePayload(p) {
+    const exp = Number(p.rank_exp || 0);
+    const rk = onRankOf(exp);
+    const fm = p.favorite_member_card || {};
+    const cardId = Number(fm.card_id || p.favorite_member_card_master_id || 0);
+    let cardName = '', charName = '', rarity = 0;
+    try {
+      const mc = ((readJson(path.join(ON_DIR, 'master', 'MasterMemberCard.json'), {}) || {})._allData || [])
+        .find(function (x) { return x._id === cardId; });
+      const text = (readJson(path.join(ON_DIR, 'master', 'MasterText.json'), {}) || {})._allData || [];
+      const t = function (id) { const r = text.find(function (x) { return String(x._id) === String(id); }); return r ? (r._simplifiedChinese || r._japanese || '') : ''; };
+      if (mc) {
+        cardName = t(mc._nameTextID) || ('卡 ' + cardId);
+        const ch = ((readJson(path.join(ON_DIR, 'master', 'MasterCharacter.json'), {}) || {})._allData || [])
+          .find(function (x) { return x._id === mc._characterID; });
+        charName = ch ? t(ch._nameTextID) : '';
+        rarity = mc._rarity || 0;
+      }
+    } catch (e) {}
+    const pc = p.profile_card || {};
+    const zip = function (urls, i) {
+      const u = (urls || [])[i];
+      return u ? path.join(ON_PLAYER_CACHE, 'pc_' + p.profile_id + '_' + (pc.slot || 0) + '_' + i + '_' + hashCode(u) + path.extname(new URL(u).pathname || '.png')) : null;
+    };
+    const urls = pc.thumbnail_url || [];
+    return {
+      payload: {
+        name: p.name || '', profileId: p.profile_id || p.id || '',
+        rank: rk.rank, rankExp: exp, rankNextExp: rk.nextExp, friendMax: rk.friendMax,
+        lastUpdatedAt: onFmtTime(p.last_updated_at),
+        avatarCardId: cardId,
+        avatar: cardId ? path.join('/www/wwwroot/ournotes-web', 'avatar-images', 'avatar-' + cardId + '.webp') : null,
+        card: { name: cardName, charName: charName, rarity: rarity, cardRank: fm.card_rank || 0, awake: fm.awake_count || 0,
+                liveSkill: fm.live_skill_level || 0, perfSkill: fm.performance_skill_level || 0,
+                art: cardId ? path.join(ON_DIR, 'art', 'full', cardId + '.jpg') : null },
+        profileCard: { slot: pc.slot || 0, name: pc.name || '', images: urls.map(function (u, i) { return zip(urls, i); }).filter(Boolean) },
+        note: '数据来自游戏内「好友 → ID搜索」能看到的那份公开资料（只读）。',
+      },
+      urls: urls.slice(0, 4).map(function (u, i) { return { url: u, file: zip(urls, i) }; }),
+    };
+  }
+  function hashCode(s) {
+    let h = 0;
+    for (let i = 0; i < String(s).length; i++) { h = (h * 31 + String(s).charCodeAt(i)) | 0; }
+    return Math.abs(h).toString(16).slice(0, 8);
+  }
+  /** 资料指纹变了就把这个号的资料卡缓存图片删掉（URL 没变但内容变了的情况） */
+  function onPruneProfileImages(profileId, sig) {
+    const metaFile = path.join(ON_PLAYER_CACHE, 'meta_' + profileId + '.json');
+    const prev = readJson(metaFile, null);
+    if (prev && prev.sig === sig) return false;
+    try {
+      fs.mkdirSync(ON_PLAYER_CACHE, { recursive: true });
+      for (const f of fs.readdirSync(ON_PLAYER_CACHE)) {
+        if (f.indexOf('pc_' + profileId + '_') === 0) { try { fs.unlinkSync(path.join(ON_PLAYER_CACHE, f)); } catch (e) {} }
+      }
+    } catch (e) {}
+    try { fs.writeFileSync(metaFile, JSON.stringify({ sig: sig, at: Date.now() })); } catch (e) {}
+    return true;
+  }
+
+  async function onDownload(url, file) {
+    if (!url || !file) return null;
+    if (fs.existsSync(file) && fs.statSync(file).size > 1024) return file;
+    try { fs.mkdirSync(path.dirname(file), { recursive: true }); } catch (e) {}
+    try {
+      await curl(url, file);                   // on_commands 里已有的下载器（curl，跟随跳转）
+      return (fs.existsSync(file) && fs.statSync(file).size > 1024) ? file : null;
+    } catch (e) { return null; }
+  }
+
+  /** /on绑定 <资料ID> */
+  async function handleOnBind(ws, msg, arg) {
+    const qq = String((msg.sender && msg.sender.user_id) || '');
+    const id = String(arg || '').trim();
+    if (!/^\d+$/.test(id)) {
+      return replyText(ws, msg, '用法：/on绑定 <游戏资料ID>\n资料ID 在游戏内「菜单 → 个人资料」里查看。\n如果要绑定网页账号，请发送 /on绑定网页 <6 位码>，网页：https://on.tabsac.com/#cloud');
+    }
+    try {
+      const r = await onBridge(['friend', id]);
+      const p = r && r.player_profile;
+      if (!p) return replyText(ws, msg, '没有查到资料ID ' + id + '（号码写错、或该玩家不存在）。');
+      const list = onMyList(qq);
+      const i = list.findIndex(function (x) { return String(x.id) === String(p.profile_id || id); });
+      const item = { id: String(p.profile_id || id), name: p.name || '', at: Date.now() };
+      let slot;
+      if (i >= 0) { list[i] = item; slot = i + 1; } else { list.push(item); slot = list.length; }
+      onSaveList(qq, list);
+      return replyText(ws, msg, '绑定成功：' + (p.name || '(无名)') + ' → u' + slot + '（资料ID ' + item.id + '）。\n'
+        + '共绑定 ' + list.length + ' 个：/on绑定列表 看全部，/on个人信息 [uN] 看名片（默认 u1），/on解绑 uN 解绑。');
+    } catch (e) {
+      return replyText(ws, msg, '绑定失败：' + String(e.message || e).slice(0, 160));
+    }
+  }
+
+  /** /on绑定列表 */
+  async function handleOnBindList(ws, msg) {
+    const qq = String((msg.sender && msg.sender.user_id) || '');
+    const list = onMyList(qq);
+    if (!list.length) return replyText(ws, msg, '还没有绑定任何资料ID。用法：/on绑定 <资料ID>（游戏内「菜单 → 个人资料」里那串数字）。');
+    const lines = list.map(function (x, i) { return 'u' + (i + 1) + '　' + (x.name || '(无名)') + '　资料ID ' + x.id; });
+    lines.push('');
+    lines.push('u1 是默认号：/on个人信息 就是看它；看别的号发 /on个人信息 u2。');
+    lines.push('调顺序 /on交换绑定 u1 u2，删掉一个 /on解绑 u2。');
+    return replyText(ws, msg, '已绑定 ' + list.length + ' 个：\n' + lines.join('\n'));
+  }
+
+  /** /on解绑 uN */
+  async function handleOnUnbind(ws, msg, arg) {
+    const qq = String((msg.sender && msg.sender.user_id) || '');
+    const list = onMyList(qq);
+    if (!list.length) return replyText(ws, msg, '你还没有绑定任何资料ID，先发 /on绑定 <资料ID>。');
+    const i = onSlot(arg, list.length);
+    if (i == null) return replyText(ws, msg, '要解绑哪个？发 /on解绑 u1 ～ u' + list.length + '（编号看 /on绑定列表）。');
+    const gone = list.splice(i, 1)[0];
+    onSaveList(qq, list);
+    return replyText(ws, msg, '已解绑 u' + (i + 1) + '：' + (gone.name || gone.id) + '。'
+      + (list.length ? '\n现在还剩 ' + list.length + ' 个，默认号 u1 是 ' + (list[0].name || list[0].id) + '。' : '\n现在没有绑定任何资料ID了。'));
+  }
+
+  /** /on交换绑定 u1 u2 */
+  async function handleOnSwapBind(ws, msg, arg) {
+    const qq = String((msg.sender && msg.sender.user_id) || '');
+    const list = onMyList(qq);
+    if (list.length < 2) return replyText(ws, msg, '至少绑两个才能换顺序（现在 ' + list.length + ' 个）。');
+    const parts = String(arg || '').trim().split(/[\s　,，]+/).filter(Boolean);
+    if (parts.length !== 2) return replyText(ws, msg, '用法：/on交换绑定 u1 u2（编号看 /on绑定列表）。');
+    const a = onSlot(parts[0], list.length), b = onSlot(parts[1], list.length);
+    if (a == null || b == null || a === b) return replyText(ws, msg, '编号要写 u1 ～ u' + list.length + '，且两个不同。');
+    const t = list[a]; list[a] = list[b]; list[b] = t;
+    onSaveList(qq, list);
+    return replyText(ws, msg, '已交换 u' + (a + 1) + ' ↔ u' + (b + 1) + '。\n现在默认号（u1）是 ' + (list[0].name || list[0].id) + '。');
+  }
+
+  /** /on个人信息 [uN] */
+  async function handleOnPlayer(ws, msg, arg) {
+    const qq = String((msg.sender && msg.sender.user_id) || '');
+    const list = onMyList(qq);
+    const raw = String(arg || '').trim();
+
+    // 指定了 uN：行为完全不变（必须来自 /on绑定 列表）
+    if (raw) {
+      if (!list.length) {
+        return replyText(ws, msg, '还没有绑定资料ID，所以看不到名片。\n'
+          + '用法：/on绑定 <资料ID> —— 资料ID 在游戏内「菜单 → 个人资料」里（一串数字）。\n'
+          + '绑定后 /on个人信息 看默认号（u1），/on个人信息 u2 看第二个。');
+      }
+      const k = onSlot(raw, list.length);
+      if (k == null) return replyText(ws, msg, '编号只到 u' + list.length + '。发 /on个人信息 看默认号，或 /on个人信息 u2 指定。');
+      return onPlayerShot(ws, msg, list[k], k, list, qq);
+    }
+
+    // 没指定 uN：优先用「网页端上传的 uid」（登录过的玩家），没有才用 /on绑定 的第一条
+    let webUid = null;
+    try {
+      webUid = onWebUid(await onApiUserData(qq));
+    } catch (e) {
+      console.log('[on] 取网页 uid 失败（继续用本地绑定）:', String(e.message || e));
+    }
+    if (webUid) {
+      const dup = list.findIndex((x) => String(x.id) === webUid);
+      // 已在绑定列表里 → 用那条（保留自定义名字与编号语义）
+      if (dup >= 0) return onPlayerShot(ws, msg, list[dup], dup, list, qq);
+      return onPlayerShot(ws, msg, { id: webUid, name: null, fromWeb: true }, -1, list, qq);
+    }
+    if (!list.length) {
+      return replyText(ws, msg, '还没有绑定资料ID，所以看不到名片。\n'
+        + '两种方式任选：\n'
+        + '· /on绑定 <资料ID> —— 资料ID 在游戏内「菜单 → 个人资料」里（一串数字）\n'
+        + '· /on绑定网页 <6 位码> —— 把 QQ 绑到网页版账号；在网页版导入过账号包后，\n'
+        + '  导入账号包后，/on个人信息 会使用其中的资料ID\n'
+        + '网页版：https://on.tabsac.com/#account');
+    }
+    return onPlayerShot(ws, msg, list[0], 0, list, qq);
+  }
+
+  // The same public friend-profile endpoint and card mapping used by /on个人信息.
+  async function onPublicPlayer(qq, data, preferredId) {
+    const id = preferredId || onWebUid(data) || ((onMyList(qq)[0] || {}).id);
+    if (!id) return null;
+    try {
+      const r = await onBridge(['friend', String(id)], 15000);
+      return r && r.player_profile ? onProfilePayload(r.player_profile).payload : null;
+    } catch (e) {
+      console.log('[on] Public player profile unavailable; render without avatar/header');
+      return null;
+    }
+  }
+
+  /** 真正去查并渲染名片（原 handleOnPlayer 的主体，抽出来供两条路径复用）
+   *  slot < 0 表示目标来自网页上传、不在绑定列表里（不写回列表） */
+  async function onPlayerShot(ws, msg, target, i, list, qq) {
+    const out = path.join(ON_DIR, 'cache', 'playershot_' + target.id + '.png');
+    try {
+      const r = await onBridge(['friend', String(target.id)]);
+      const p = r && r.player_profile;
+      if (!p) {
+        return replyText(ws, msg, (i >= 0 ? 'u' + (i + 1) : '网页上传的 #' + target.id)
+          + ' 的资料暂时查不到（接口没返回这个资料ID）。');
+      }
+      const built = onProfilePayload(p);
+      // 指纹：等级经验 / 更新时间 / 资料卡槽位与名字 / 缩略图 URL 列表，任一变了就重下图片
+      const sig = [p.rank_exp || 0, p.last_updated_at || 0, built.payload.profileCard.slot,
+        built.payload.profileCard.name, (built.payload.profileCard.images || []).length,
+        (p.profile_card && (p.profile_card.thumbnail_url || [])).join(',')].join('|');
+      const changed = onPruneProfileImages(target.id, sig);
+      if (changed) console.log('[on] 资料有变化，重新拉取资料卡图片：' + target.id);
+      for (const it of built.urls) { try { await onDownload(it.url, it.file); } catch (e) {} }
+      const inJson = path.join(ON_DIR, 'cache', 'player_' + target.id + '.json');
+      try { fs.mkdirSync(path.dirname(inJson), { recursive: true }); } catch (e) {}
+      fs.writeFileSync(inJson, JSON.stringify(built.payload));
+      const file = await runPy(['player.py', '--in', inJson, '--out', out], out);
+      // 名字变了顺手刷新列表（资料会变，绑定只记 ID）
+      if (i >= 0 && p.name && p.name !== target.name) {
+        list[i] = Object.assign({}, target, { name: p.name, at: Date.now() });
+        onSaveList(qq, list);
+      } else if (i < 0 && p.name) {
+        console.log('[on] 名片用的资料ID来自网页上传：' + target.id + '（' + p.name + '）');
+      }
+      return replyImage(ws, msg, file);
+    } catch (e) {
+      return replyText(ws, msg, '查询失败：' + String(e.message || e).slice(0, 160));
+    }
+  }
+
+  // ---------------- 网页版登录码（机器人领码 → 用户在网页上换 token）----------------
+  //  后端：tools/planner_api.py（127.0.0.1:8080），内部接口只认本机 + X-Bot-Secret
+  const ON_API_ENV_FILE = path.join(ON_DIR, '..', 'api', 'api.env');
+
+  function onApiEnv() {
+    const out = {};
+    try {
+      for (const line of fs.readFileSync(ON_API_ENV_FILE, 'utf8').split('\n')) {
+        const m = /^\s*([A-Z_]+)\s*=\s*(.*)$/.exec(line);
+        if (m) out[m[1]] = m[2].trim();
+      }
+    } catch (e) {}
+    return out;
+  }
+
+  /**
+   * 拉该 QQ 在网页端保存的数据（B25 / 卡库），走本机 8080 转发 → 东京内部接口。
+   * 内部接口要 X-Bot-Secret；404 表示这个 QQ 没绑网页账号（不是错误）。
+   * 结果缓存 5 分钟，避免每条命令都打后端。
+   */
+  const onWebCache = new Map();          // qq -> { at, data }
+
+  function onApiUserData(qq, force, kind = '') {
+    const key = String(qq) + (kind ? ':' + kind : '');
+    const hit = onWebCache.get(key);
+    if (!force && hit && Date.now() - hit.at < 5 * 60 * 1000) return Promise.resolve(hit.data);
+    const env = onApiEnv();
+    const port = env.ON_API_PORT || '8080';
+    const secret = env.ON_BOT_SECRET || '';
+    if (!secret) return Promise.reject(new Error('后端没配 ON_BOT_SECRET（data/api/api.env）'));
+    const p = '/api/internal/user-data?qq=' + encodeURIComponent(String(qq)) + '&full=1' + (kind === 'activity' ? '&kind=activity&latest=1' : '');
+    return new Promise((resolve, reject) => {
+      const req = require('http').request({
+        host: '127.0.0.1', port: Number(port), path: p, method: 'GET',
+        headers: { 'X-Bot-Secret': secret }, timeout: 12000,
+      }, (res) => {
+        const c = [];
+        res.on('data', (d) => c.push(d));
+        res.on('end', () => {
+          let j = null;
+          try { j = JSON.parse(Buffer.concat(c).toString('utf8')); } catch (e) {}
+          if (res.statusCode === 200 && j) {
+            onWebCache.set(key, { at: Date.now(), data: j });
+            resolve(j);
+          } else if (res.statusCode === 404) {
+            const empty = { account: null, results: [] };   // 这个 QQ 没绑网页账号
+            onWebCache.set(key, { at: Date.now(), data: empty });
+            resolve(empty);
+          } else {
+            reject(new Error('后端返回 ' + res.statusCode + (j && j.message ? '：' + j.message : '')));
+          }
+        });
+      });
+      req.on('timeout', () => req.destroy(new Error('后端超时')));
+      req.on('error', reject);
+      req.end();
+    });
+  }
+
+  function onWebB25(data) {
+    return ((data && data.results) || []).find((x) => x.kind === 'b25') || null;
+  }
+
+  function onWebProfile(data) {
+    return ((data && data.results) || []).find((x) => x.kind === 'profile') || null;
+  }
+
+  /** 网页端上传的「玩家资料ID」：优先卡库的 account_import.account_id，其次 B25 的 accountId */
+  function onWebUid(data) {
+    const prof = onWebProfile(data);
+    const ai = prof && prof.payload && prof.payload.document && prof.payload.document.account_import;
+    if (ai && ai.account_id) return String(ai.account_id);
+    const b = onWebB25(data);
+    const pid = b && b.payload && (b.payload.accountId || (b.payload.player || {}).account_id);
+    return pid ? String(pid) : null;
+  }
+
+  /** 向后端要一个一次性登录码；返回 { code, expiresIn } */
+  function onApiLoginCode(qq) {
+    const env = onApiEnv();
+    const port = env.ON_API_PORT || '8080';
+    const secret = env.ON_BOT_SECRET || '';
+    if (!secret) return Promise.reject(new Error('后端没配 ON_BOT_SECRET（data/api/api.env）'));
+    const body = Buffer.from(JSON.stringify({ qq: String(qq) }), 'utf8');
+    return new Promise((resolve, reject) => {
+      const req = require('http').request({
+        host: '127.0.0.1', port: Number(port), path: '/api/internal/login-code', method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': body.length, 'X-Bot-Secret': secret },
+        timeout: 8000,
+      }, (res) => {
+        const c = [];
+        res.on('data', (d) => c.push(d));
+        res.on('end', () => {
+          let j = null;
+          try { j = JSON.parse(Buffer.concat(c).toString('utf8')); } catch (e) {}
+          if (res.statusCode === 200 && j && j.code) resolve(j);
+          else reject(new Error('后端返回 ' + res.statusCode + (j && j.message ? '：' + j.message : '')));
+        });
+      });
+      req.on('timeout', () => req.destroy(new Error('后端超时')));
+      req.on('error', reject);
+      req.end(body);
+    });
+  }
+
+  let b25Queue = Promise.resolve(), b25Pending = 0;
+  function runB25(src, out, renderer = 'b25-render.cjs') {
+    if (b25Pending >= 3) return Promise.reject(new Error('B25 render queue full'));
+    b25Pending += 1;
+    const job = b25Queue.then(() => new Promise((resolve, reject) => {
+      const runtime = path.join(ON_DIR, 'b25-runtime');
+      const child = spawn(process.execPath, ['--max-old-space-size=128', path.join(runtime, 'tools', renderer), '--in', src, '--out', out],
+        {cwd: ON_DIR, env: Object.assign({}, process.env, {SKIA_THREADS: '1'})});
+      let log = '', done = false;
+      const timer = setTimeout(() => { if (!done) child.kill('SIGKILL'); }, 30000);
+      child.stderr.on('data', d => { log = (log + d.toString()).slice(-2000); });
+      child.on('error', e => { done = true; clearTimeout(timer); reject(e); });
+      child.on('close', code => { done = true; clearTimeout(timer);
+        if (code === 0 && fs.existsSync(out)) resolve(out);
+        else reject(new Error(log.trim() || 'B25 render failed'));
+      });
+    }));
+    b25Queue = job.catch(() => {});
+    return job.finally(() => { b25Pending -= 1; });
+  }
+
+  const deckPending=new Map();
+  function onApiDeck(body){const env=onApiEnv(),secret=env.ON_BOT_SECRET||'';if(!secret)return Promise.reject(Error('组卡账号服务暂不可用。'));const bytes=Buffer.from(JSON.stringify(body));return new Promise((resolve,reject)=>{const req=require('http').request({host:'127.0.0.1',port:Number(env.ON_API_PORT||8080),path:'/api/internal/deck-jobs',method:'POST',headers:{'Content-Type':'application/json','Content-Length':bytes.length,'X-Bot-Secret':secret},timeout:15000},res=>{const chunks=[];res.on('data',v=>chunks.push(v));res.on('end',()=>{try{const value=JSON.parse(Buffer.concat(chunks));if(res.statusCode===200&&value.job)resolve(value);else reject(Error(value.message||'组卡接口暂不可用。'));}catch(e){reject(e);}});});req.on('timeout',()=>req.destroy(Error('组卡接口超时，请稍后重试。')));req.on('error',reject);req.end(bytes);});}
+  async function handleCloudDeck(ws,msg,command,arg){
+    const qq=String(msg.sender?.user_id||msg.user_id||'');let raw=String(arg||'').trim();const skip=/(?:^|\s)skip(?:\s|$)/i.test(raw);raw=raw.replace(/(?:^|\s)skip(?=\s|$)/ig,' ').trim();
+    const goal=command==='歌榜组卡'?'leaderboard':command==='活动组卡'?'activity':command==='激奏组卡'?'gekiso':command==='自由组卡'?'daily':'fire';
+    if(raw==='平均')raw='';if(raw&& !['daily','gekiso'].includes(goal))return replyText(ws,msg,'只有 /on激奏组卡 和 /on自由组卡 支持指定歌曲；其他指令可添加 skip。');
+    let song='';if(raw){const matched=resolveSong(raw);if(!matched)return replyText(ws,msg,'未找到歌曲：'+raw+'。可先使用 /on查曲 查询名称。');song=String(matched.id);}
+    if(!song){const titles={leaderboard:'活动歌榜',activity:'活动收益（CP、PT、徽章）',gekiso:'激奏组卡',daily:'自由组卡',fire:'日常 / 清火组卡'};return replyText(ws,msg,command+'请在网页勾选「'+titles[goal]+'」，选择'+(skip?'Skip':'非 Skip')+'后开始计算。\n可一次勾选多个目标；目标越多，计算越慢。\nhttps://on.tabsac.com/#plan');}
+    const options={goals:[goal],methods:[skip?'skip':'ap'],song,maxLevel:99,boost:4,searchSeconds:3};const key=qq+JSON.stringify(options);
+    if(deckPending.has(key))return replyText(ws,msg,'这项组卡正在计算，完成后会自动发送图片。可在网页查看进度：https://on.tabsac.com/#plan');
+    if(deckPending.size>=8)return replyText(ws,msg,'当前组卡请求较多，请稍后再试。');
+    deckPending.set(key,true);
+    try{
+      let response=await onApiDeck({qq,options}),job=response.job;const profileId=response.profileId;
+      if(['queued','running'].includes(job.status))replyText(ws,msg,command+'已提交，'+(job.status==='queued'?'正在排队':'正在计算')+'，完成后自动发送。云端会保存结果。\nhttps://on.tabsac.com/#plan');
+      const start=Date.now();let longNotice=false;while(['queued','running'].includes(job.status)){if(!longNotice&&Date.now()-start>30*60*1000){longNotice=true;replyText(ws,msg,'本批仍在计算，完成后会继续自动发图。可到网页查看进度或取消：https://on.tabsac.com/#plan');}await new Promise(r=>setTimeout(r,Date.now()-start>60000?15000:3000));job=(await onApiDeck({qq,id:job.id})).job;}
+      if(job.status!=='complete')return replyText(ws,msg,'本批'+(job.status==='cancelled'?'已取消':'尚未完成')+'：'+(job.error||'请查看云端记录')+'\nhttps://on.tabsac.com/#plan');
+      const batch=structuredClone(job.result);let data;try{data=await onApiUserData(qq,true);}catch{}batch.player=await onPublicPlayer(qq,data,profileId);
+      const dir=path.join(ON_DIR,'tmp');fs.mkdirSync(dir,{recursive:true});const stamp='deck-'+Date.now()+'-'+crypto.randomBytes(6).toString('hex'),input=path.join(dir,stamp+'.json'),output=path.join(dir,stamp+'.png');let outputs=[];
+      try{fs.writeFileSync(input,JSON.stringify(batch),{mode:0o600});await runB25(input,output,'deck-render.cjs');outputs=JSON.parse(fs.readFileSync(output+'.pages.json','utf8'));for(const file of outputs){if(path.dirname(file)!==dir||!path.basename(file).startsWith(stamp))throw Error('图片路径无效。');replyImage(ws,msg,file);}replyText(ws,msg,(job.reused?'已复用云端结果。':'计算完成，结果已保存到云端。')+'\n'+(goal==='gekiso'?'激奏为单人任务模型参考，尚不能预测多人连胜。\n':'')+'https://on.tabsac.com/#plan');}
+      finally{for(const file of [input,output+'.pages.json'])try{fs.unlinkSync(file);}catch{}setTimeout(()=>{for(const file of outputs)if(path.dirname(file)===dir&&path.basename(file).startsWith(stamp))try{fs.unlinkSync(file);}catch{}},300000).unref();}
+    }catch(e){replyText(ws,msg,e.message+'\n网页：https://on.tabsac.com/#plan\n绑定 QQ：https://on.tabsac.com/#cloud');}
+    finally{deckPending.delete(key);}
+  }
+
+  async function handleActivityDeck(ws, msg) {
+    const qq = String((msg.sender && msg.sender.user_id) || '');
+    let data;
+    try {data = await onApiUserData(qq, true, 'activity');} catch {return replyText(ws,msg,'暂时无法读取组卡方案，请稍后重试。网页：https://on.tabsac.com/');}
+    const rows = ((data && data.results) || []).filter(r=>r.kind==='activity' && r.payload && r.payload.result && r.payload.schema_version===1);
+    rows.sort((a,b)=>String(b.payload.savedAt||'').localeCompare(String(a.payload.savedAt||'')));
+    if (!rows.length) return replyText(ws,msg,'还没有已保存的活动组卡方案。\n打开 https://on.tabsac.com/，登录账号并完成收益计算，结果会自动保存。\n在 https://on.tabsac.com/#cloud 绑定 QQ 后，再发送 /on活动组卡。');
+    const p=rows[0].payload;
+    let model;
+    try {model=JSON.parse(fs.readFileSync('/www/wwwroot/ournotes-web/build-info.json','utf8')).activity_model;} catch {return replyText(ws,msg,'组卡图片暂时不可用，请稍后重试。网页：https://on.tabsac.com/');}
+    if(p.model!==model) return replyText(ws,msg,'活动数据或计算模型已更新，请打开 https://on.tabsac.com/ 重新计算，完成后会自动保存新方案。');
+    const dir=path.join(ON_DIR,'tmp');fs.mkdirSync(dir,{recursive:true});
+    const stamp='activity-'+Date.now()+'-'+crypto.randomBytes(6).toString('hex');
+    const input=path.join(dir,stamp+'.json'),out=path.join(dir,stamp+'.png');
+    try {
+      fs.writeFileSync(input,JSON.stringify(p),{mode:0o600});
+      await runB25(input,out,'activity-render.cjs');replyImage(ws,msg,out);
+      return replyText(ws,msg,'活动组卡方案\n计算日期：'+String(p.computedAt||p.savedAt||'').slice(0,10)+'\n网页：https://on.tabsac.com/');
+    } catch(e) {console.error('[on] activity render failed:',e.message);return replyText(ws,msg,'组卡图片生成失败，请在 https://on.tabsac.com/ 下载图片，或重新计算后再试。');}
+    finally {try{fs.unlinkSync(input);}catch{}setTimeout(()=>{try{fs.unlinkSync(out);}catch{}},300000).unref();}
+  }
+
+  /** /onb25 —— 看自己在网页版保存的 B25 成绩卡（渲染成一张图） */
+  async function handleOnB25(ws, msg) {
+    const qq = String((msg.sender && msg.sender.user_id) || '');
+    let data;
+    try {
+      data = await onApiUserData(qq, true);            // 命令是显式查询，绕过缓存
+    } catch (e) {
+      return replyText(ws, msg, '暂时无法读取成绩，请稍后重试。网页：https://on.tabsac.com/#b25');
+    }
+    const b = onWebB25(data);
+    if (!b) {
+      return replyText(ws, msg, '还没有可显示的 B25 成绩卡。\n'
+        + '1. 打开 https://on.tabsac.com/#account，导入游戏账号包。\n'
+        + '2. 登录网页账号，在「B25 成绩」页点击「把这张卡存到云端」。\n'
+        + '3. 在 https://on.tabsac.com/#cloud 点击「绑定 QQ」，然后在这里发送 /on绑定网页 <6 位码>。\n'
+        + '完成后发送 /onb25 查看成绩图片。');
+    }
+    const p = Object.assign({}, b.payload || {});
+    p.player = Object.assign({}, p.player || {});
+    const livePlayer = await onPublicPlayer(qq, data, p.accountId || p.player.account_id);
+    // Never keep a stale imported favourite card when the public lookup fails.
+    delete p.player.favorite_card_id;
+    p.player.avatar_card_id = livePlayer ? livePlayer.avatarCardId : null;
+    const st = p.stats || {};
+    const cacheDir = path.join(ON_DIR, 'cache');
+    const stamp = Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+    const out = path.join(cacheDir, 'b25_' + qq + '_' + stamp + '.png');
+    const jsonPath = path.join(cacheDir, 'b25_' + qq + '_' + stamp + '.json');
+    try {
+      fs.mkdirSync(cacheDir, { recursive: true });
+      fs.writeFileSync(jsonPath, JSON.stringify(p));
+      const upd = String(p.savedAt || '').slice(0, 10) || new Date().toISOString().slice(0, 10);
+      const site = 'https://on.tabsac.com/';
+      const file = await runB25(jsonPath, out);
+      console.log('[on] /onb25 ' + qq + ' -> ' + (p.playerName || '') + ' Rating ' + (st.rating_avg != null ? st.rating_avg : '-')
+        + ' 计入 ' + (st.count != null ? st.count : '-') + ' FC ' + (st.fc_count != null ? st.fc_count : '-')
+        + '/' + (st.ap_count != null ? st.ap_count : '-') + ' v' + (b.version != null ? b.version : '?'));
+      // 先发图（网页端那张导出图的版式），再补一行「已显示 / 更新日期 / 网站」
+      replyImage(ws, msg, file);
+      return replyText(ws, msg, 'B25 成绩卡\n更新日期：' + upd + '\n网页：' + site + '#b25');
+    } catch (e) {
+      console.error('[on] B25 render failed:', e.message || e);
+      return replyText(ws, msg, '成绩图片生成失败，请稍后重试，或到网页下载：https://on.tabsac.com/#b25');
+    } finally {
+      try { fs.unlinkSync(jsonPath); } catch (_) {}
+      const cleanup = setTimeout(() => { try { fs.unlinkSync(out); } catch (_) {} }, 5 * 60 * 1000);
+      cleanup.unref();
+    }
+  }
+
+  /** 兑换网页端生成的 QQ 绑定码：/on绑定网页 <6 位码> */
+  async function handleWebBindQQ(ws, msg, arg) {
+    const qq = String((msg.sender && msg.sender.user_id) || '');
+    const code = String(arg || '').trim();
+    if (!/^\d{6}$/.test(code)) {
+      return replyText(ws, msg, '用法：/on绑定网页 <6 位码>\n'
+        + '· 打开 https://on.tabsac.com/#cloud 并登录网页账号\n'
+        + '· 网页里点「绑定 QQ」，它会给你一串 6 位码\n'
+        + '· 再回到这里发：/on绑定网页 <那串码>');
+    }
+    const env = onApiEnv();
+    const secret = env.ON_BOT_SECRET || '';
+    if (!secret) return replyText(ws, msg, '账号服务暂不可用，请联系管理员。');
+    const body = Buffer.from(JSON.stringify({ code: code, qq: qq }), 'utf8');
+    try {
+      const r = await new Promise((resolve, reject) => {
+        const req = require('http').request({
+          host: '127.0.0.1', port: Number(env.ON_API_PORT || '8080'), path: '/api/internal/bind-qq', method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Content-Length': body.length, 'X-Bot-Secret': secret },
+          timeout: 8000,
+        }, (res) => {
+          const c = [];
+          res.on('data', (d) => c.push(d));
+          res.on('end', () => {
+            let j = null;
+            try { j = JSON.parse(Buffer.concat(c).toString('utf8')); } catch (e) {}
+            resolve({ status: res.statusCode, body: j || {} });
+          });
+        });
+        req.on('timeout', () => req.destroy(new Error('后端超时')));
+        req.on('error', reject);
+        req.end(body);
+      });
+      if (r.status === 200 && r.body.ok) {
+        return replyText(ws, msg, '绑定成功：这个 QQ（' + qq + '）已绑到网页账号「' + (r.body.username || '') + '」。\n'
+          + '以后在网页上用账号密码登录就行，忘密码时也能靠这个 QQ 找回（找管理员）。');
+      }
+      return replyText(ws, msg, '绑定失败：' + (r.body.message || ('后端返回 ' + r.status))
+        + '\n（码 10 分钟内有效、且只能用一次；也可能是这个 QQ 已经绑过别的账号了）');
+    } catch (e) {
+      return replyText(ws, msg, '绑定失败：' + String((e && e.message) || e).slice(0, 140)
+        + '\n请稍后重试，或联系管理员。网页：https://on.tabsac.com/#cloud');
+    }
+  }
+
   // ---------------- 匹配注册
   const defs = [
     { re: /^\s*\/on(?:guesscard|猜卡|gcard)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleGuessCard(ws, msg, m[1] || ''), shortOnly: true },
@@ -2075,7 +2699,19 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     { re: /^\s*\/on(?:rank|难度排行|排行)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleRank(ws, msg, m[1] || '') },
     { re: /^\s*\/on(?:benefit|效益排行|效益)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleEff(ws, msg, m[1] || '', 'benefit') },
     { re: /^\s*\/on(?:efficiency|eff|效率排行|效率)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleEff(ws, msg, m[1] || '', 'eff') },
-    { re: /^\s*\/on(?:stamp|贴纸)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleStamp(ws, msg, m[1] || '') },
+    { re: /^\s*\/on(?:stamp|emote|表情)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleCollectible(ws, msg, m[1] || '', 'emote') },
+    { re: /^\s*\/on(?:sticker|贴纸)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleCollectible(ws, msg, m[1] || '', 'degree') },
+    // 玩家名片：绑定列表 / 解绑 / 交换绑定 / 绑定网页 都要排在「绑定」前面，
+    // 否则参数会被 /on绑定 先吃掉（踩过：/on绑定网页 123456 被当成资料ID 123456 去查 gRPC）
+    { re: /^\s*\/on(歌榜组卡|活动组卡|激奏组卡|自由组卡|日常组卡|清火组卡)\s*([\s\S]*)$/i, run: (ws,msg,m) => handleCloudDeck(ws,msg,m[1],m[2]||'') },
+    { re: /^\s*\/on(?:b25|B25|b25成绩|成绩卡)\s*([\s\S]*)$/i, run: (ws, msg) => handleOnB25(ws, msg) },
+    { re: /^\s*\/on个人信息\s*([\s\S]*)$/i, run: (ws, msg, m) => handleOnPlayer(ws, msg, m[1] || '') },
+    { re: /^\s*\/on(?:绑定网页|网页绑定|绑定页面|页面绑定|webbind)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleWebBindQQ(ws, msg, m[1] || '') },
+    { re: /^\s*\/on(?:绑定列表|bindlist|账号列表)\s*([\s\S]*)$/i, run: (ws, msg) => handleOnBindList(ws, msg) },
+    { re: /^\s*\/on(?:解绑|unbind)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleOnUnbind(ws, msg, m[1] || '') },
+    { re: /^\s*\/on(?:交换绑定|swapbind)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleOnSwapBind(ws, msg, m[1] || '') },
+    { re: /^\s*\/on(?:绑定|bind)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleOnBind(ws, msg, m[1] || '') },
+    { re: /^\s*\/on(?:个人信息|我的信息|名片|me|profile)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleOnPlayer(ws, msg, m[1] || '') },
     { re: /^\s*\/on(?:gacha|卡池|招募)\s*([\s\S]*)$/i, run: (ws, msg) => handleGacha(ws, msg) },
     { re: /^\s*\/on(?:event|活动|活动一览)\s*([\s\S]*)$/i, run: (ws, msg) => handleEvent(ws, msg) },
     { re: /^\s*\/on(?:song|曲|查曲)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleSong(ws, msg, m[1] || '') },

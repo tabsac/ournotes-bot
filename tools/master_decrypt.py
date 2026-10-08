@@ -12,11 +12,8 @@ import sys, os, gzip
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rijndael import Rijndael
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
-from secrets import need  # noqa: E402
-
-KEY = bytes.fromhex(need("masterKey", "ON_MASTER_KEY", "主数据表 Rijndael-256 密钥"))
-IV = bytes.fromhex(need("masterIv", "ON_MASTER_IV", "主数据表 IV"))
+KEY = bytes.fromhex("0532791c510a08eb7ede6b46c6ba71ea9aa2a3cfb678a595f89d67c8a5e493b6")
+IV = bytes.fromhex("9b94c91e242a562e97fcd505b75a5129b2b80632a269034cf942ec7293d489a1")
 HEADER = 64
 A1 = bytes.fromhex("b50b23a5fd628c3dc386f7488f81d6b0450b8c89671574f55a3ad815f10b8e30")
 

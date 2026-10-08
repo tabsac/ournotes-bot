@@ -5,23 +5,6 @@ import os
 import re
 import shutil
 
-def _secret(key):
-    """密钥/凭据：环境变量 → ../secrets.json（不入库）"""
-    import json as _json
-    env = {'cdnAuth': 'ON_CDN_AUTH', 'masterKey': 'ON_MASTER_KEY', 'masterIv': 'ON_MASTER_IV',
-           'bundleKey': 'ON_BUNDLE_KEY', 'bundleSeed': 'ON_BUNDLE_SEED', 'hcaBaseKey': 'ON_HCA_BASE_KEY'}
-    v = os.environ.get(env.get(key, key))
-    if v:
-        return v
-    try:
-        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'secrets.json'),
-                  encoding='utf-8') as fh:
-            return _json.load(fh).get(key)
-    except Exception:
-        return None
-
-
-
 BASE = r"C:\Users\13766\dsh-workspace"
 MIRROR = r"C:\Users\13766\.dsh\remote-workspaces\39.105.184.173-root-22\dsh_server_workspace"
 MD = "/home/admin/bot/data/on/master"
@@ -125,7 +108,7 @@ out = {
     "source": "Our Notes 主数据 MasterLiveMusic / MasterLiveMusicScore / MasterVideo / MasterText",
     "count": len(songs),
     "cdn": "https://l14-prod-hk-patch-sirius.gamerfusiontech.com/prod/hk_27f3c91e8b62d6056c7a19f2e83b6d10/asset/Android",
-    "auth": os.environ.get("ON_CDN_AUTH") or _secret("cdnAuth") or "",
+    "auth": "sirius:pXrQcRvnwkux6hp89OpgFHytDjm2DTM",
     "songs": sorted(songs, key=lambda s: s["id"]),
 }
 os.makedirs(os.path.join(MIRROR, "on"), exist_ok=True)

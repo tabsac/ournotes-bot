@@ -19,7 +19,7 @@ Three things that made every off-the-shelf attempt fail (all handled in hca_dec)
 
 2. The payload is enciphered with a PER-FILE substitution table derived from the
    AWB's AFS2 subkey (the standard CRI scheme):
-       eff   = <基础密钥，见 secrets.json 的 hcaBaseKey> * ((subkey << 16) | ((uint16_t)~subkey + 2))
+       eff   = 0x2004C2F77 * ((subkey << 16) | ((uint16_t)~subkey + 2))
        table = cipher_init56(eff)          # clHCA's 56-bit keycode cipher
        plain[i] = table[cipher[i]]         # for i >= header_size
    For initialbgm (subkey 0xbd94) this reproduces the table read live from the

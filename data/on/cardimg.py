@@ -57,7 +57,8 @@ TYPE_TEXT_KEY = {1: "CardType_Red_Name", 2: "CardType_Blue_Name", 3: "CardType_G
                  4: "CardType_Yellow_Name", 5: "CardType_Purple_Name"}
 ATTR_ICON = {1: "type1_red.png", 2: "type2_blue.png", 3: "type3_green.png",
              4: "type4_gold.png", 5: "type5_purple.png"}
-RARITY_ART = {4: "rarity_SSR.png", 3: "rarity_SR.png", 2: "rarity_R.png"}
+RARITY_ART = {4: "rarity_SSR.png", 3: "rarity_SR.png", 2: "rarity_R.png",
+              20: "rarity_EX.png", 10: "rarity_BD.png"}   # EX/BD 的图 2026-10-03 补上（原来只有 R/SR/SSR，才闹出「拼成目录」那个 bug）   # 20=EX / 10=BD 没有对应图，paste_icon 会返回 None
 GREEN = (60, 200, 120)
 
 
@@ -200,7 +201,10 @@ def find_art(kind, cid):
 
 
 def paste_icon(canvas, path, box_w):
-    if not path or not os.path.exists(path):
+    # 注意：这里必须是 isfile —— os.path.join(UI_DIR, '') 会得到「目录」，
+    # 用 exists() 判断会为真，随后 Image.open(目录) 直接抛 IsADirectoryError
+    # （稀有度 20=EX 在 ui/ 里没有 rarity_*.png，正好走这条空路径）。
+    if not path or not os.path.isfile(path):
         return None
     im = Image.open(path).convert("RGBA")
     h = round(im.height * box_w / im.width)
@@ -256,6 +260,11 @@ def render_grid(d, cards, out_path, title=None, subtitle=None, accent=None, font
         rar_art = paste_icon(canvas, os.path.join(UI_DIR, RARITY_ART.get(card["_rarity"], "")), 76)
         if rar_art:
             canvas.paste(rar_art, (ax + ART_W - 8 - rar_art.width, ay + ART_H - 6 - rar_art.height), rar_art)
+        else:
+            _lab = RARITY_LABEL.get(card["_rarity"], "")          # EX / BD 没有美术，就用文字
+            if _lab:
+                dr.text((ax + ART_W - 12, ay + ART_H - 10), _lab, font=fonts.get(24, True),
+                        fill=(214, 164, 52), anchor="rs")
         ty = ay + ART_H + 10
         tfont = fonts.get(21, True)
         for line in wrap(dr, d.zh(card["_subtitleTextID"]), tfont, CELL_W - 28, 2):
@@ -383,6 +392,10 @@ def render_detail(d, card, out_path, fonts, scale=1.0):
     rar_art = paste_icon(panel, os.path.join(UI_DIR, RARITY_ART.get(card["_rarity"], "")), 132)
     if rar_art:
         panel.paste(rar_art, (D_PANEL_W - X - rar_art.width, 6), rar_art)
+    else:
+        _lab = RARITY_LABEL.get(card["_rarity"], "")
+        if _lab:
+            p.text((D_PANEL_W - X, 8), _lab, font=fonts.get(40, True), fill=(214, 164, 52), anchor="ra")
     y += 6
 
     icon = paste_icon(panel, os.path.join(UI_DIR, ATTR_ICON.get(card["_cardType"], "")), 40)
