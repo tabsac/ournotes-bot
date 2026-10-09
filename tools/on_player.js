@@ -167,7 +167,23 @@ async function rpc(service, method, bodyObj, extraHeaders, noRetry) {
   const m = (svc.methods || []).find((x) => x.name === method);
   if (!m) throw new Error('服务 ' + service + ' 没有方法 ' + method);
   const body = bodyObj ? encode(m.input, bodyObj) : Buffer.alloc(0);
-  const res = await rawCall('/' + service + '/' + method, body, extraHeaders);
+  // Version discovery is public and must not inherit a stale client/master header.
+  if (service === 'app.masterdata.MasterdataService' && method === 'Version') {
+    extraHeaders = Object.assign({}, extraHeaders, {'x-client-version': undefined, 'x-master-version': undefined, 'x-resource-version': undefined});
+  }
+  let res = await rawCall('/' + service + '/' + method, body, extraHeaders);
+  // This read-only profile endpoint accepts an optional client version. Keep the
+  // existing authenticated credential; refresh master metadata, never relogin
+  // merely because an old client version header is rejected.
+  if (service === 'app.friend.FriendService' && method === 'FindByProfileID' &&
+      /client update required|master version mismatch/i.test(decodeURIComponent(res.trailers['grpc-message'] || ''))) {
+    const version = await rpc('app.masterdata.MasterdataService', 'Version', {}, {}, true);
+    const session = readJson(SESSION_FILE, {});
+    writeJson(SESSION_FILE, Object.assign({}, session, {masterVersion: version.version, resourceVersion: version.resource_version}));
+    res = await rawCall('/' + service + '/' + method, body, Object.assign({}, extraHeaders, {
+      'x-client-version': undefined, 'x-master-version': version.version, 'x-resource-version': version.resource_version,
+    }));
+  }
   const st = res.trailers['grpc-status'];
   const msg = decodeURIComponent(res.trailers['grpc-message'] || '');
   if (st && st !== '0') {
