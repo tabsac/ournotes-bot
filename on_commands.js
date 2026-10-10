@@ -642,12 +642,12 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
 
   // 单条指令的详细用法（/onhelp <指令>）
   const HELP_DETAIL = {
-    '活动组卡': ['用法：/on活动组卡 [skip]', '分别推荐刷 CP、活动 PT、徽章的歌曲和队伍，合为一张图。默认非 Skip（AP参考），可加 skip。', '此指令返回网页链接；勾选活动收益及 Skip / 非 Skip 后计算，结果可在网页下载。https://on.tabsac.com/#plan'],
-    '歌榜组卡': ['用法：/on歌榜组卡 [skip]', '对当前活动的所有歌曲分别推荐最高分队伍。默认非 Skip；加 skip 比较跳过分。此指令返回网页链接，请勾选活动歌榜后计算。'],
-    '激奏组卡': ['用法：/on激奏组卡 [平均|曲名] [skip]', '不填歌曲或填平均：返回网页链接；指定歌曲：服务器计算并发送该曲队伍。', '例：/on激奏组卡 春日影　/on激奏组卡 平均', '当前采用单人任务模型与区间首位假设，仅为激奏参考，不能预测多人连胜。Skip只比较跳过分，不触发激奏任务。'],
-    '自由组卡': ['用法：/on自由组卡 [平均|曲名] [skip]', '不填歌曲或填平均：返回网页链接，勾选自由组卡；指定歌曲：服务器计算并发送该曲队伍。', '例：/on自由组卡 春日影　/on自由组卡 平均 skip'],
-    '日常组卡': ['用法：/on日常组卡 [skip]，或 /on清火组卡 [skip]', '两条指令同义，返回网页链接，勾选日常 / 清火组卡计算每 Boost 收益更高的歌曲及队伍，同时列出 CP、PT、徽章目标。默认非 Skip，可添加 skip。'],
-    '组卡': ['网页：https://on.tabsac.com/#plan', '指令：/on歌榜组卡、/on活动组卡、/on激奏组卡、/on自由组卡、/on日常组卡（或/on清火组卡）。', '均可添加 skip，只有激奏与自由支持歌曲名称或平均。默认非 Skip、最高可用难度、4 Boost。', '网页导入并同步卡库：https://on.tabsac.com/#account；绑定 QQ：https://on.tabsac.com/#cloud', '仅指定歌曲由机器人提交服务器计算并发图；其他指令返回网页链接，勾选后发起计算并保存。更多目标会变慢。激奏目前为单人任务模型参考，尚不代表多人连胜。'],
+    '活动组卡': ['用法：/on活动组卡 [skip]', '分别推荐刷 CP、活动 PT、徽章的歌曲和队伍，合为一张图。默认非 Skip（AP参考），可加 skip。', '优先返回云端已保存的对应组卡图片；没有匹配结果时返回网页链接，勾选活动收益及 Skip / 非 Skip 后计算并同步云端。https://on.tabsac.com/#plan'],
+    '歌榜组卡': ['用法：/on歌榜组卡 [skip]', '对当前活动的所有歌曲分别推荐最高分队伍。默认非 Skip；加 skip 比较跳过分。优先返回云端已保存的对应歌榜图片；没有匹配结果时提示在网页计算并同步。'],
+    '激奏组卡': ['用法：/on激奏组卡 [平均|曲名] [skip]', '不填歌曲或填平均：优先返回云端已保存的平均组卡图片，没有匹配结果才返回网页链接；指定歌曲：服务器计算并发送该曲队伍。', '例：/on激奏组卡 春日影　/on激奏组卡 平均', '当前采用单人任务模型与区间首位假设，仅为激奏参考，不能预测多人连胜。Skip只比较跳过分，不触发激奏任务。'],
+    '自由组卡': ['用法：/on自由组卡 [平均|曲名] [skip]', '不填歌曲或填平均：优先返回云端已保存的自由组卡图片，没有匹配结果才提示网页计算并同步；指定歌曲：服务器计算并发送该曲队伍。', '例：/on自由组卡 春日影　/on自由组卡 平均 skip'],
+    '日常组卡': ['用法：/on日常组卡 [skip]，或 /on清火组卡 [skip]', '两条指令同义，优先返回云端已保存的对应图片，没有匹配结果才提示在网页勾选日常 / 清火组卡计算每 Boost 收益更高的歌曲及队伍，同时列出 CP、PT、徽章目标。默认非 Skip，可添加 skip。'],
+    '组卡': ['网页：https://on.tabsac.com/#plan', '指令：/on歌榜组卡、/on活动组卡、/on激奏组卡、/on自由组卡、/on日常组卡（或/on清火组卡）。', '均可添加 skip，只有激奏与自由支持歌曲名称或平均。默认非 Skip、最高可用难度、4 Boost。', '网页导入并同步卡库：https://on.tabsac.com/#account；绑定 QQ：https://on.tabsac.com/#cloud', '指定歌曲由机器人提交服务器计算并发图；其他指令先返回云端已保存的对应结果图片，没有匹配结果才返回网页链接，勾选后计算并同步。更多目标会变慢。激奏目前为单人任务模型参考，尚不代表多人连胜。'],
     'B25': ['用法：/onb25', '查看保存在云端的 B25 成绩图片。', '导入账号包：https://on.tabsac.com/#account', '保存成绩：https://on.tabsac.com/#b25', '绑定 QQ：https://on.tabsac.com/#cloud'],
     '查卡': ['/on查卡（/oncard）',
       '用法 /on查卡 <角色> [星级]　/on查卡 <团体|颜色> [星级]　/on查卡 <数字ID>',
@@ -2545,12 +2545,42 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
 
   const deckPending=new Map();
   function onApiDeck(body){const env=onApiEnv(),secret=env.ON_BOT_SECRET||'';if(!secret)return Promise.reject(Error('组卡账号服务暂不可用。'));const bytes=Buffer.from(JSON.stringify(body));return new Promise((resolve,reject)=>{const req=require('http').request({host:'127.0.0.1',port:Number(env.ON_API_PORT||8080),path:'/api/internal/deck-jobs',method:'POST',headers:{'Content-Type':'application/json','Content-Length':bytes.length,'X-Bot-Secret':secret},timeout:15000},res=>{const chunks=[];res.on('data',v=>chunks.push(v));res.on('end',()=>{try{const value=JSON.parse(Buffer.concat(chunks));if(res.statusCode===200&&value.job)resolve(value);else reject(Error(value.message||'组卡接口暂不可用。'));}catch(e){reject(e);}});});req.on('timeout',()=>req.destroy(Error('组卡接口超时，请稍后重试。')));req.on('error',reject);req.end(bytes);});}
+  async function handleSavedCloudDeck(ws,msg,qq,command,goal,skip){
+    const titles={leaderboard:'活动歌榜',activity:'活动收益（CP、PT、徽章）',gekiso:'激奏组卡',daily:'自由组卡',fire:'日常 / 清火组卡'};
+    const method=skip?'skip':'ap',key=qq+':saved:'+goal+':'+method;
+    if(deckPending.has(key))return replyText(ws,msg,'正在读取并生成这项云端组卡图片，请稍候。');
+    const web=command+'尚无匹配的云端结果。请在网页勾选「'+titles[goal]+'」，选择'+(skip?'Skip':'非 Skip')+'后计算并同步云端。\nhttps://on.tabsac.com/#plan';
+    if(deckPending.size>=8)return replyText(ws,msg,'当前组卡请求较多，请稍后再试。');
+    deckPending.set(key,true);
+    let input,output,outputs=[];
+    const dir=path.join(ON_DIR,'tmp'),stamp='saved-deck-'+Date.now()+'-'+crypto.randomBytes(6).toString('hex');
+    try{
+      const data=await onApiUserData(qq,true);
+      if(!data.account)return replyText(ws,msg,'请先在网页绑定当前 QQ，再读取已上传的组卡结果。\nhttps://on.tabsac.com/#cloud');
+      const preferred=onWebUid(data)||String((onMyList(qq)[0]||{}).id||'');
+      const selected=require('./lib/cloud_deck_results.cjs').selectCloudDeck(data,{goal,method,profileId:preferred});
+      if(!selected)return replyText(ws,msg,web);
+      const batch=structuredClone(selected.batch);batch.player=await onPublicPlayer(qq,data,selected.profileId);
+      fs.mkdirSync(dir,{recursive:true});input=path.join(dir,stamp+'.json');output=path.join(dir,stamp+'.png');
+      fs.writeFileSync(input,JSON.stringify(batch),{mode:0o600});await runB25(input,output,'deck-render.cjs');
+      outputs=JSON.parse(fs.readFileSync(output+'.pages.json','utf8'));
+      for(const file of outputs){if(path.dirname(file)!==dir||!path.basename(file).startsWith(stamp))throw Error('图片路径无效。');}
+      for(const file of outputs)replyImage(ws,msg,file);
+      return replyText(ws,msg,'已读取云端保存的'+command+'结果（'+(skip?'Skip':'非 Skip')+'）。\nhttps://on.tabsac.com/#plan');
+    }catch(e){console.error('[on] saved deck render failed:',e.message);return replyText(ws,msg,'云端组卡结果读取或图片生成失败，请稍后重试。\nhttps://on.tabsac.com/#plan');}
+    finally{
+      for(const file of [input,output&&output+'.pages.json'])if(file)try{fs.unlinkSync(file);}catch{}
+      setTimeout(()=>{for(const file of outputs)if(path.dirname(file)===dir&&path.basename(file).startsWith(stamp))try{fs.unlinkSync(file);}catch{}},300000).unref();
+      deckPending.delete(key);
+    }
+  }
+
   async function handleCloudDeck(ws,msg,command,arg){
     const qq=String(msg.sender?.user_id||msg.user_id||'');let raw=String(arg||'').trim();const skip=/(?:^|\s)skip(?:\s|$)/i.test(raw);raw=raw.replace(/(?:^|\s)skip(?=\s|$)/ig,' ').trim();
     const goal=command==='歌榜组卡'?'leaderboard':command==='活动组卡'?'activity':command==='激奏组卡'?'gekiso':command==='自由组卡'?'daily':'fire';
     if(raw==='平均')raw='';if(raw&& !['daily','gekiso'].includes(goal))return replyText(ws,msg,'只有 /on激奏组卡 和 /on自由组卡 支持指定歌曲；其他指令可添加 skip。');
     let song='';if(raw){const matched=resolveSong(raw);if(!matched)return replyText(ws,msg,'未找到歌曲：'+raw+'。可先使用 /on查曲 查询名称。');song=String(matched.id);}
-    if(!song){const titles={leaderboard:'活动歌榜',activity:'活动收益（CP、PT、徽章）',gekiso:'激奏组卡',daily:'自由组卡',fire:'日常 / 清火组卡'};return replyText(ws,msg,command+'请在网页勾选「'+titles[goal]+'」，选择'+(skip?'Skip':'非 Skip')+'后开始计算。\n可一次勾选多个目标；目标越多，计算越慢。\nhttps://on.tabsac.com/#plan');}
+    if(!song)return handleSavedCloudDeck(ws,msg,qq,command,goal,skip);
     const options={goals:[goal],methods:[skip?'skip':'ap'],song,maxLevel:99,boost:4,searchSeconds:3};const key=qq+JSON.stringify(options);
     if(deckPending.has(key))return replyText(ws,msg,'这项组卡正在计算，完成后会自动发送图片。可在网页查看进度：https://on.tabsac.com/#plan');
     if(deckPending.size>=8)return replyText(ws,msg,'当前组卡请求较多，请稍后再试。');
