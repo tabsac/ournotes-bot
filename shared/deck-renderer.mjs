@@ -2,8 +2,8 @@ export function deckPages(batch){
  if(batch?.kind!=='deck-batch'||batch.schema_version!==1||!Array.isArray(batch.sections)||!batch.display)throw Error('组卡结果不完整。');
  const rows=[];
  for(const section of batch.sections){for(const entry of section.entries||[{rows:section.rows,method:section.method}]){
-  const selected=['activity','fire'].includes(section.goal)?(entry.rows||[]).slice(0,1):(entry.rows||[]);
-  for(const row of selected){if(row.member_ids?.length!==5||row.snap_ids?.length!==5)throw Error('队伍卡牌数量不正确。');rows.push({section,entry,row,alternatives:['activity','fire'].includes(section.goal)?(entry.rows||[]).slice(1):[]});}
+  const selected=['activity','fire','challenge'].includes(section.goal)?(entry.rows||[]).slice(0,1):(entry.rows||[]);
+  for(const row of selected){if(row.member_ids?.length!==5||row.snap_ids?.length!==5)throw Error('队伍卡牌数量不正确。');rows.push({section,entry,row,alternatives:['activity','fire','challenge'].includes(section.goal)?(entry.rows||[]).slice(1):[]});if(row.challenge_team){rows.push({section,entry:{...entry,label:'对应挑战演出 · '+(entry.metric==='event_pt'?'活动 PT':'徽章')},row:row.challenge_team,alternatives:[]});}}
  }}
  if(!rows.length)throw Error('当前没有完成的组卡结果。');
  const pages=[];for(let i=0;i<rows.length;i+=6)pages.push(rows.slice(i,i+6));return pages;
@@ -19,11 +19,11 @@ export async function renderDeckBatch(batch,api,page=0){
  const player=batch.player;let left=52;if(player?.avatarCardId){await image('avatar-images/avatar-'+Number(player.avatarCardId)+'.webp',52,87,100,100);left=172;}
  text(player?.name||batch.name||'我的卡库',left,120,27,'#25375b',980,true);if(player)text('UID '+player.profileId+' · Rank '+player.rank+' · 更新 '+player.lastUpdatedAt,left,158,21,'#536581',980);
  text('计算于 '+new Date(batch.computedAt).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false})+' · '+(page+1)+' / '+pages.length+' 页',52,225,21);
- text('成员卡 3:4 · 留影卡 16:9 · 保持原图比例',52,264,18,'#536581');
+ text((batch.options?.growthMode==='full-training'?'满特训 · 满等级':batch.options?.growthMode==='current-max'?'当前特训／解锁阶段满等级':'已保存养成')+' · 成员卡 3:4 · 留影卡 16:9',52,264,18,'#536581');
  for(const [index,item] of rows.entries()){
   const {section,entry,row,alternatives}=item,y=300+index*560;box(y,540);const method=entry.method||section.method;const song=row.song_title||songs.get(row.song_id)||'';text((entry.label||section.label)+' · '+(method==='skip'?'Skip':'非 Skip'),song?134:54,y+42,27,'#286cba',1075,true);if(song&&Number.isSafeInteger(Number(row.song_id))&&Number(row.song_id)>0){await image('jacket-images/song-'+Number(row.song_id)+'.webp',54,y+14,64,64);}const songLeft=song?134:54;text(song?(song+' · '+(row.difficulty||'')):'跨曲平均队伍 · 覆盖 '+row.covered_sheets+' 首',songLeft,y+77,22,'#33435f',600-songLeft-20);
   for(let i=0;i<5;i++){const px=54+i*216,mid=row.member_ids[i],sid=row.snap_ids[i],m=cards.get(mid),s=snaps.get(sid),g=inventory.members.find(v=>v.id===mid)||{},sg=inventory.snaps.find(v=>v.id===sid)||{};await image(m?.thumbnail,px,y+95,176,176*4/3);await image(s?.thumbnail,px,y+337,176,99);text('#'+mid+' '+(m?.name||'')+(mid===row.leader_member_id?' ★':''),px,y+461,17,'#25375b',202,true);text('Lv.'+(g.level??'—')+' · Live '+(g.live_skill_level??'—')+' · 激奏 '+(g.gekisou_skill_level??'—'),px,y+485,15,'#536581',202);text('Snap #'+sid+' · Lv.'+(sg.level??'—')+' · 突'+(sg.limit_break_count??'—'),px,y+508,15,'#536581',202);}
-  let metric=row.average_relative_score!==undefined?'平均相对表现 '+f(row.average_relative_score*100)+'% · 薄弱场景 '+f(row.weak_relative_score*100)+'%':row.target_value!==undefined?f(row.target_value)+' '+(entry.unit||'')+' / 局':'参考分 '+f(row.score);
+  let metric=row.average_relative_score!==undefined?'平均相对表现 '+f(row.average_relative_score*100)+'% · 薄弱场景 '+f(row.weak_relative_score*100)+'%':row.target_value!==undefined?f(row.target_value)+' '+(entry.unit||'')+' / 局'+(row.stage==='challenge'?' · '+row.consumed+' CP':''):'参考分 '+f(row.score);
   text(metric,600,y+76,22,'#286cba',550,true);
   if(alternatives.length)text('备选乐曲：'+alternatives.map(v=>v.song_title||songs.get(v.song_id)||'#'+v.song_id).join(' / '),54,y+531,15,'#536581',1070);
  }

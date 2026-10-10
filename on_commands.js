@@ -601,7 +601,9 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     '【图鉴・排行】',
     '/on小漫画 [角色]              随机一张加载漫画（不给角色就随机）',
     '/on卡池                       当期招募一览图（封面・概率・Pick Up）',
-    '/on歌榜组卡 [skip]            为所有活动歌曲分别推荐队伍',
+    '/on活动歌榜 [skip]          三首活动歌曲各自最高分队伍',
+    '/on挑战演出 [skip]          挑战歌曲 PT / 徽章收益队伍',
+    '　所有组卡默认当前阶段满等级；加 满特训 读取对应假设结果',
     '/on活动组卡 [skip]            推荐刷 CP、PT、徽章的歌曲和队伍（同图）',
     '/on激奏组卡 [平均|歌曲] [skip] 激奏跨曲参考或指定歌曲',
     '/on自由组卡 [平均|歌曲] [skip] 自由模式跨曲平均或指定歌曲',
@@ -643,11 +645,13 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
   // 单条指令的详细用法（/onhelp <指令>）
   const HELP_DETAIL = {
     '活动组卡': ['用法：/on活动组卡 [skip]', '分别推荐刷 CP、活动 PT、徽章的歌曲和队伍，合为一张图。默认非 Skip（AP参考），可加 skip。', '优先返回云端已保存的对应组卡图片；没有匹配结果时返回网页链接，勾选活动收益及 Skip / 非 Skip 后计算并同步云端。https://on.tabsac.com/#plan'],
-    '歌榜组卡': ['用法：/on歌榜组卡 [skip]', '对当前活动的所有歌曲分别推荐最高分队伍。默认非 Skip；加 skip 比较跳过分。优先返回云端已保存的对应歌榜图片；没有匹配结果时提示在网页计算并同步。'],
+    '挑战演出': ['用法：/on挑战演出 [skip] [满特训]', '读取网页计算并同步的挑战演出结果，推荐活动 PT、徽章收益对应歌曲与队伍。挑战演出消耗普通演出取得的 CP。', '网页：https://on.tabsac.com/#plan'],
+    '活动歌榜': ['用法：/on活动歌榜 [skip] [满特训]', '三首活动歌每首仅展示最高评分的队伍。与 /on歌榜组卡 相同。'],
+    '歌榜组卡': ['用法：/on歌榜组卡 [skip]', '对当前活动的三首歌曲各展示一支最高分队伍。默认非 Skip；加 skip 比较跳过分。优先返回云端已保存的对应歌榜图片；没有匹配结果时提示在网页计算并同步。'],
     '激奏组卡': ['用法：/on激奏组卡 [平均|曲名] [skip]', '不填歌曲或填平均：优先返回云端已保存的平均组卡图片，没有匹配结果才返回网页链接；指定歌曲：服务器计算并发送该曲队伍。', '例：/on激奏组卡 春日影　/on激奏组卡 平均', '当前采用单人任务模型与区间首位假设，仅为激奏参考，不能预测多人连胜。Skip只比较跳过分，不触发激奏任务。'],
     '自由组卡': ['用法：/on自由组卡 [平均|曲名] [skip]', '不填歌曲或填平均：优先返回云端已保存的自由组卡图片，没有匹配结果才提示网页计算并同步；指定歌曲：服务器计算并发送该曲队伍。', '例：/on自由组卡 春日影　/on自由组卡 平均 skip'],
     '日常组卡': ['用法：/on日常组卡 [skip]，或 /on清火组卡 [skip]', '两条指令同义，优先返回云端已保存的对应图片，没有匹配结果才提示在网页勾选日常 / 清火组卡计算每 Boost 收益更高的歌曲及队伍，同时列出 CP、PT、徽章目标。默认非 Skip，可添加 skip。'],
-    '组卡': ['网页：https://on.tabsac.com/#plan', '指令：/on歌榜组卡、/on活动组卡、/on激奏组卡、/on自由组卡、/on日常组卡（或/on清火组卡）。', '均可添加 skip，只有激奏与自由支持歌曲名称或平均。默认非 Skip、最高可用难度、4 Boost。', '网页导入并同步卡库：https://on.tabsac.com/#account；绑定 QQ：https://on.tabsac.com/#cloud', '指定歌曲由机器人提交服务器计算并发图；其他指令先返回云端已保存的对应结果图片，没有匹配结果才返回网页链接，勾选后计算并同步。更多目标会变慢。激奏目前为单人任务模型参考，尚不代表多人连胜。'],
+    '组卡': ['网页：https://on.tabsac.com/#plan', '指令：/on活动歌榜（或/on歌榜组卡）、/on挑战演出、/on活动组卡、/on激奏组卡、/on自由组卡、/on日常组卡（或/on清火组卡）。', '均可添加 skip，只有激奏与自由支持歌曲名称或平均。默认非 Skip、最高可用难度、3 Boost（仅计算 0、1、2、3 档，10 档不参与）。', '网页导入并同步卡库：https://on.tabsac.com/#account；绑定 QQ：https://on.tabsac.com/#cloud', '指定歌曲由机器人提交服务器计算并发图；其他指令先返回云端已保存的对应结果图片，没有匹配结果才返回网页链接，勾选后计算并同步。更多目标会变慢。激奏目前为单人任务模型参考，尚不代表多人连胜。'],
     'B25': ['用法：/onb25', '查看保存在云端的 B25 成绩图片。', '导入账号包：https://on.tabsac.com/#account', '保存成绩：https://on.tabsac.com/#b25', '绑定 QQ：https://on.tabsac.com/#cloud'],
     '查卡': ['/on查卡（/oncard）',
       '用法 /on查卡 <角色> [星级]　/on查卡 <团体|颜色> [星级]　/on查卡 <数字ID>',
@@ -735,6 +739,8 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
 
   // /onhelp 的参数 → 上面的键（中英文名与常用简称都认）
   const HELP_ALIAS = {
+    '挑战演出': '挑战演出',
+    '活动歌榜': '活动歌榜',
     '歌榜组卡': '歌榜组卡', '激奏组卡': '激奏组卡', '自由组卡': '自由组卡', '日常组卡': '日常组卡', '清火组卡': '日常组卡',
     '组卡': '组卡', '配队': '组卡', '多目标组卡': '组卡',
     '活动组卡': '活动组卡',
@@ -760,8 +766,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     'guessvoice': '猜语音', '猜语音': '猜语音', 'gvoice': '猜语音',
     'answer': '回答', '回答': '回答', '答': '回答', '猜': '回答',
     'end': '结束', '结束': '结束', '放弃': '结束',
-    'help': '帮助', '帮助': '帮助', '说明': '帮助',
-  };
+    'help': '帮助', '帮助': '帮助', '说明': '帮助',  };
 
   /** /onhelp [指令]：不给参数发总览，给了就看单条用法 */
   function helpFor(arg) {
@@ -2545,8 +2550,8 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
 
   const deckPending=new Map();
   function onApiDeck(body){const env=onApiEnv(),secret=env.ON_BOT_SECRET||'';if(!secret)return Promise.reject(Error('组卡账号服务暂不可用。'));const bytes=Buffer.from(JSON.stringify(body));return new Promise((resolve,reject)=>{const req=require('http').request({host:'127.0.0.1',port:Number(env.ON_API_PORT||8080),path:'/api/internal/deck-jobs',method:'POST',headers:{'Content-Type':'application/json','Content-Length':bytes.length,'X-Bot-Secret':secret},timeout:15000},res=>{const chunks=[];res.on('data',v=>chunks.push(v));res.on('end',()=>{try{const value=JSON.parse(Buffer.concat(chunks));if(res.statusCode===200&&value.job)resolve(value);else reject(Error(value.message||'组卡接口暂不可用。'));}catch(e){reject(e);}});});req.on('timeout',()=>req.destroy(Error('组卡接口超时，请稍后重试。')));req.on('error',reject);req.end(bytes);});}
-  async function handleSavedCloudDeck(ws,msg,qq,command,goal,skip){
-    const titles={leaderboard:'活动歌榜',activity:'活动收益（CP、PT、徽章）',gekiso:'激奏组卡',daily:'自由组卡',fire:'日常 / 清火组卡'};
+  async function handleSavedCloudDeck(ws,msg,qq,command,goal,skip,growthMode){
+    const titles={challenge:'挑战演出',leaderboard:'活动歌榜',activity:'活动收益（CP、PT、徽章）',gekiso:'激奏组卡',daily:'自由组卡',fire:'日常 / 清火组卡'};
     const method=skip?'skip':'ap',key=qq+':saved:'+goal+':'+method;
     if(deckPending.has(key))return replyText(ws,msg,'正在读取并生成这项云端组卡图片，请稍候。');
     const web=command+'尚无匹配的云端结果。请在网页勾选「'+titles[goal]+'」，选择'+(skip?'Skip':'非 Skip')+'后计算并同步云端。\nhttps://on.tabsac.com/#plan';
@@ -2558,7 +2563,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
       const data=await onApiUserData(qq,true);
       if(!data.account)return replyText(ws,msg,'请先在网页绑定当前 QQ，再读取已上传的组卡结果。\nhttps://on.tabsac.com/#cloud');
       const preferred=onWebUid(data)||String((onMyList(qq)[0]||{}).id||'');
-      const selected=require('./lib/cloud_deck_results.cjs').selectCloudDeck(data,{goal,method,profileId:preferred});
+      const selected=require('./lib/cloud_deck_results.cjs').selectCloudDeck(data,{goal,method,profileId:preferred,growthMode});
       if(!selected)return replyText(ws,msg,web);
       const batch=structuredClone(selected.batch);batch.player=await onPublicPlayer(qq,data,selected.profileId);
       fs.mkdirSync(dir,{recursive:true});input=path.join(dir,stamp+'.json');output=path.join(dir,stamp+'.png');
@@ -2576,12 +2581,12 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
   }
 
   async function handleCloudDeck(ws,msg,command,arg){
-    const qq=String(msg.sender?.user_id||msg.user_id||'');let raw=String(arg||'').trim();const skip=/(?:^|\s)skip(?:\s|$)/i.test(raw);raw=raw.replace(/(?:^|\s)skip(?=\s|$)/ig,' ').trim();
-    const goal=command==='歌榜组卡'?'leaderboard':command==='活动组卡'?'activity':command==='激奏组卡'?'gekiso':command==='自由组卡'?'daily':'fire';
+    const qq=String(msg.sender?.user_id||msg.user_id||'');let raw=String(arg||'').trim();const skip=/(?:^|\s)skip(?:\s|$)/i.test(raw);raw=raw.replace(/(?:^|\s)skip(?=\s|$)/ig,' ').trim();const growthMode=/(?:^|\s)满特训(?:\s|$)/.test(raw)?'full-training':'current-max';raw=raw.replace(/(?:^|\s)满特训(?=\s|$)/g,' ').trim();
+    const goal=['歌榜组卡','活动歌榜'].includes(command)?'leaderboard':command==='挑战演出'?'challenge':command==='活动组卡'?'activity':command==='激奏组卡'?'gekiso':command==='自由组卡'?'daily':'fire';
     if(raw==='平均')raw='';if(raw&& !['daily','gekiso'].includes(goal))return replyText(ws,msg,'只有 /on激奏组卡 和 /on自由组卡 支持指定歌曲；其他指令可添加 skip。');
     let song='';if(raw){const matched=resolveSong(raw);if(!matched)return replyText(ws,msg,'未找到歌曲：'+raw+'。可先使用 /on查曲 查询名称。');song=String(matched.id);}
-    if(!song)return handleSavedCloudDeck(ws,msg,qq,command,goal,skip);
-    const options={goals:[goal],methods:[skip?'skip':'ap'],song,maxLevel:99,boost:4,searchSeconds:3};const key=qq+JSON.stringify(options);
+    if(!song)return handleSavedCloudDeck(ws,msg,qq,command,goal,skip,growthMode);
+    const options={growthMode,goals:[goal],methods:[skip?'skip':'ap'],song,maxLevel:99,boost:3,searchSeconds:3};const key=qq+JSON.stringify(options);
     if(deckPending.has(key))return replyText(ws,msg,'这项组卡正在计算，完成后会自动发送图片。可在网页查看进度：https://on.tabsac.com/#plan');
     if(deckPending.size>=8)return replyText(ws,msg,'当前组卡请求较多，请稍后再试。');
     deckPending.set(key,true);
@@ -2733,7 +2738,7 @@ function register({ commands, sendReply, imageCqFromPath, CONFIG }) {
     { re: /^\s*\/on(?:sticker|贴纸)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleCollectible(ws, msg, m[1] || '', 'degree') },
     // 玩家名片：绑定列表 / 解绑 / 交换绑定 / 绑定网页 都要排在「绑定」前面，
     // 否则参数会被 /on绑定 先吃掉（踩过：/on绑定网页 123456 被当成资料ID 123456 去查 gRPC）
-    { re: /^\s*\/on(歌榜组卡|活动组卡|激奏组卡|自由组卡|日常组卡|清火组卡)\s*([\s\S]*)$/i, run: (ws,msg,m) => handleCloudDeck(ws,msg,m[1],m[2]||'') },
+    { re: /^\s*\/on(歌榜组卡|活动歌榜|挑战演出|活动组卡|激奏组卡|自由组卡|日常组卡|清火组卡)\s*([\s\S]*)$/i, run: (ws,msg,m) => handleCloudDeck(ws,msg,m[1],m[2]||'') },
     { re: /^\s*\/on(?:b25|B25|b25成绩|成绩卡)\s*([\s\S]*)$/i, run: (ws, msg) => handleOnB25(ws, msg) },
     { re: /^\s*\/on个人信息\s*([\s\S]*)$/i, run: (ws, msg, m) => handleOnPlayer(ws, msg, m[1] || '') },
     { re: /^\s*\/on(?:绑定网页|网页绑定|绑定页面|页面绑定|webbind)\s*([\s\S]*)$/i, run: (ws, msg, m) => handleWebBindQQ(ws, msg, m[1] || '') },
